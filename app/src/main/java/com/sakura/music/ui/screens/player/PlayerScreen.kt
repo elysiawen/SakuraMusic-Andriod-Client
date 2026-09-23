@@ -36,6 +36,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Cached
+import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.SwapHoriz
@@ -107,6 +108,7 @@ import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.ui.appContainer
 import com.sakura.music.ui.components.AddToPlaylistSheet
 import com.sakura.music.ui.components.ChoiceSheet
+import com.sakura.music.ui.components.DeviceSheet
 import com.sakura.music.ui.components.PlaybackErrorCard
 import com.sakura.music.ui.components.QueueSheet
 import com.sakura.music.ui.components.SnackbarMessages
@@ -159,6 +161,7 @@ fun PlayerScreen(onCollapse: () -> Unit) {
     var showQuality by remember { mutableStateOf(false) }
     var showActions by remember { mutableStateOf(false) }
     var showAddToPlaylist by remember { mutableStateOf(false) }
+    var showDevices by remember { mutableStateOf(false) }
 
     // 拖动进度时歌词跟着走（但不打扰播放器）；松手后回到真实进度。
     var scrubPosition by remember { mutableStateOf<Long?>(null) }
@@ -274,6 +277,15 @@ fun PlayerScreen(onCollapse: () -> Unit) {
                     Icon(Icons.Rounded.KeyboardArrowDown, contentDescription = "收起")
                 }
                 Spacer(Modifier.weight(1f))
+
+                // 投送到其它设备：同一账号下的设备互相可见，可以把播放交接过去。
+                IconButton(onClick = { showDevices = true }) {
+                    Icon(
+                        imageVector = Icons.Rounded.Cast,
+                        contentDescription = "播放到其它设备",
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
 
                 IconButton(onClick = { showActions = true }) {
                     Icon(
@@ -508,6 +520,13 @@ fun PlayerScreen(onCollapse: () -> Unit) {
             track = track,
             onMessage = { message = it },
             onDismiss = { showAddToPlaylist = false },
+        )
+    }
+
+    if (showDevices) {
+        DeviceSheet(
+            onDismiss = { showDevices = false },
+            onMessage = { message = it },
         )
     }
 }

@@ -21,8 +21,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -35,8 +38,17 @@ data class PlaybackState(
     val index: Int = -1,
     val isPlaying: Boolean = false,
     val isBuffering: Boolean = false,
+    /**
+     * 当前进度。
+     *
+     * 由主线程的轮询循环维护（见 `PlaybackCenter.startPolling`）。**别绕开这两个字段
+     * 去读 `MediaController`**：它只能在创建它的线程上用，后台协程直接读会当场
+     * 抛 `IllegalStateException: MediaController method is called from a wrong thread`。
+     */
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
+    /** 音量（0~1），同样由主线程轮询维护。 */
+    val volume: Float = 1f,
     val error: String? = null,
     /** 当前曲目只能听到试听片段（受版权或会员限制）。 */
     val trial: Boolean = false,
@@ -101,6 +113,15 @@ class PlaybackCenter(
      */
     private val _notice = MutableStateFlow<String?>(null)
     val notice: StateFlow<String?> = _notice.asStateFlow()
+
+    /**
+     * 用户拖动进度条（或任何主动 seek）。
+     *
+     * 单独开一条流而不是并进 [state]：多设备那边要的是「刚刚 seek 了」这个**事件**，
+     * 而不是「进度是多少」这个状态——后者每条都有，前者才有上报的价值。
+     */
+    private val _seeks = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
+    val seeks: SharedFlow<Unit> = _seeks.asSharedFlow()
 
     fun consumeNotice() {
         _notice.value = null
@@ -227,6 +248,8 @@ class PlaybackCenter(
                             positionMs = active.currentPosition.coerceAtLeast(0L),
                             durationMs = durationOf(active),
                             isPlaying = active.isPlaying,
+                            // 音量也一起带出来：外面（多设备上报）读不到 MediaController。
+                            volume = active.volume.coerceIn(0f, 1f),
                         )
                     }
 
@@ -256,6 +279,7 @@ class PlaybackCenter(
                 isPlaying = active.isPlaying,
                 isBuffering = active.playbackState == Player.STATE_BUFFERING,
                 durationMs = durationOf(active),
+                volume = active.volume.coerceIn(0f, 1f),
             )
         }
     }
@@ -341,15 +365,30 @@ class PlaybackCenter(
         return true
     }
 
-    /** 播放一个列表；[startIndex] 是列表里该从哪一首开始。 */
-    fun play(tracks: List<UnifiedTrack>, startIndex: Int = 0) {
+    /**
+     * 播放一个列表。
+     *
+     * [startIndex] 是列表里该从哪一首开始，[startPositionMs] 是从那一首的第几毫秒开始。
+     *
+     * 起播位置**必须**跟着 [MediaController.setMediaItems] 一起给出，不能等装好队列再补一个
+     * `seekTo`：两者都是跨进程的异步命令，`seekTo` 会落在**尚未被替换的旧队列**上，
+     * 随后新队列一装载就把位置清成 0——接管过来的进度就是这么丢的。
+     */
+    fun play(
+        tracks: List<UnifiedTrack>,
+        startIndex: Int = 0,
+        startPositionMs: Long = 0L,
+    ) {
         if (tracks.isEmpty()) return
         val index = startIndex.coerceIn(0, tracks.size - 1)
         if (blockedByWifiOnly(tracks[index])) return
+        val startAt = startPositionMs.coerceAtLeast(0L)
         mainScope.launch {
             val active = controller ?: return@launch
-            _state.update { it.copy(error = null) }
-            active.setMediaItems(itemsOf(tracks, index, artworkOf(tracks[index])), index, 0L)
+            _state.update {
+                it.copy(error = null, positionMs = startAt)
+            }
+            active.setMediaItems(itemsOf(tracks, index, artworkOf(tracks[index])), index, startAt)
             active.prepare()
             active.play()
             syncQueue()
@@ -497,6 +536,10 @@ class PlaybackCenter(
             controller?.seekTo(positionMs.coerceAtLeast(0L))
             _state.update { it.copy(positionMs = positionMs.coerceAtLeast(0L)) }
         }
+        // 多设备那条线要知道「用户拖了进度」：进度跳变不会产生任何播放状态变化，
+        // 光靠事件驱动的话别的设备永远看不到这次拖动。Media3 也不会为 seek 回调，
+        // 所以只能在这里主动说一声。
+        _seeks.tryEmit(Unit)
     }
 
     /** 播放模式那个按钮：顺序 → 列表循环 → 单曲循环 → 随机 → 顺序。 */

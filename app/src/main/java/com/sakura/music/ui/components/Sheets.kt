@@ -58,9 +58,9 @@ import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.ui.appContainer
 
-/** 底部弹层统一的壳：标题 + 分隔线 + 内容。 */
+/** 底部弹层统一的壳：标题 + 分隔线 + 内容。同模块的其它弹层也用它。 */
 @Composable
-private fun SheetScaffold(
+internal fun SheetScaffold(
     title: String,
     onDismiss: () -> Unit,
     trailing: @Composable (() -> Unit)? = null,

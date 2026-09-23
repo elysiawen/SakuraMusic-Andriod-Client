@@ -4,6 +4,7 @@ import android.content.Context
 import androidx.media3.datasource.DataSource
 import androidx.media3.datasource.cache.CacheDataSource
 import com.sakura.music.core.player.LyricLine
+import com.sakura.music.core.player.ConnectSync
 import com.sakura.music.core.player.KeyAwareDataSource
 import com.sakura.music.core.player.PlaybackCenter
 import com.sakura.music.core.player.PlaybackResolver
@@ -11,6 +12,8 @@ import com.sakura.music.core.player.PlaybackRouteTracker
 import com.sakura.music.core.player.SakuraDataSource
 import com.sakura.music.core.player.sakuraCacheKeyFactory
 import com.sakura.music.data.cache.CacheManager
+import com.sakura.music.data.connect.ConnectClient
+import com.sakura.music.data.connect.DeviceIdentity
 import com.sakura.music.data.downloads.DownloadCenter
 import com.sakura.music.data.downloads.DownloadStore
 import com.sakura.music.data.model.HealthResponse
@@ -32,6 +35,7 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import java.io.File
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.TimeUnit
 
@@ -45,6 +49,35 @@ class AppContainer(private val appContext: Context) {
     val applicationContext: Context get() = appContext
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** [start] 会被重复调用（比如 Activity 重建后重新拉起），门闩挡一下。 */
+    private val started = AtomicBoolean(false)
+
+    /**
+     * 起两个后台观察者：多设备长连接的启停、以及缓存上限的恢复。
+     *
+     * **必须等容器构造完成后再调用**（目前是 `MusicApp.onCreate`）。
+     * 不能在 `init` 块里做：这个协程跑在别的线程上，抢在构造器给字段赋值之前
+     * 访问 `by lazy` 属性时，拿到的是**还没赋值的委托字段本身**（null），
+     * 一点就是 `NullPointerException`。构造越慢越容易中招，是纯粹的竞态。
+     */
+    fun start() {
+        if (!started.compareAndSet(false, true)) return
+
+        // 多设备长连接跟着登录态走：没登录连上去只会 401，登出后也该立刻断开。
+        // 离线（没能确认登录态）时不连——网络本来就不通，连也是白连。
+        scope.launch {
+            authRepository.state.collect { auth ->
+                if (auth.isLoggedIn && !auth.offline) {
+                    // 先把指令的订阅者建出来再连：指令是发给它的，晚一步就可能丢。
+                    connectSync
+                    connectClient.start()
+                } else {
+                    connectClient.stop()
+                }
+            }
+        }
+    }
 
     val json: Json = Json {
         ignoreUnknownKeys = true
@@ -318,6 +351,33 @@ class AppContainer(private val appContext: Context) {
      * 队列是全局的：列表页点一下就得能播，播放器页与迷你播放条看到的必须是同一份状态，
      * 所以它挂在容器上而不是某个页面的 ViewModel 里。
      */
+    /* ------------------------------ 多设备 ------------------------------ */
+
+    /** 本机在多设备列表里的身份（deviceId 持久化，重启后还是同一台）。 */
+    val deviceIdentity: DeviceIdentity by lazy { DeviceIdentity(appContext) }
+
+    val connectClient: ConnectClient by lazy {
+        ConnectClient(
+            api = apiClient,
+            baseUrlProvider = { gatewayBaseUrl },
+            httpClient = okHttpClient,
+            identity = deviceIdentity,
+            json = json,
+            scope = scope,
+        )
+    }
+
+    /** 上报与指令执行；连接本身由 [connectClient] 维持。 */
+    val connectSync: ConnectSync by lazy {
+        ConnectSync(
+            client = connectClient,
+            playback = playbackCenter,
+            settings = settings,
+            json = json,
+            scope = scope,
+        )
+    }
+
     val playbackCenter: PlaybackCenter by lazy {
         PlaybackCenter(
             api = api,
