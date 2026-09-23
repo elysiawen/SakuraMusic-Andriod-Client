@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 启动窗口的底色，取主题里的中性浅色，避免启动瞬间闪白。 -->
+    <color name="splash_background">#FAFAFA</color>
+    <!-- 取自 logo 底板的颜色（gen_icons.py 采样生成）。 -->
+    <color name="ic_launcher_background">#FFFFFF</color>
+</resources>
