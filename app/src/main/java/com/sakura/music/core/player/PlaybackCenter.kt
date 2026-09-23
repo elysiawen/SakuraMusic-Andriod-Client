@@ -155,6 +155,13 @@ class PlaybackCenter(
                 mainScope.launch { applyPlayMode(mode) }
             }
         }
+        // 锁了直连却总连不上：告诉用户去哪儿改。这里只提示、不代他改——
+        // 「锁定」是他自己设的，系统不该背着他换线路。
+        scope.launch {
+            resolver.directIssues.collect { platform ->
+                _notice.value = "「${platform.label}」直连连续失败，可在「设置 → 网络」里把连接方式改为「智能」或「中转」"
+            }
+        }
     }
 
     /* ------------------------------ 连接 ------------------------------ */
@@ -519,6 +526,44 @@ class PlaybackCenter(
         mainScope.launch { controller?.pause() }
     }
 
+    /**
+     * 改本机音量（远程 `volume` 指令也走这里）。
+     *
+     * 音量是**设备**的属性而不是内容的属性：同一份播放状态在不同设备上可以不一样，
+     * 所以它跟着设备走、不跟着队列走，也是跟随播放时唯一不该同步的东西。
+     */
+    fun setVolume(value: Float) {
+        val target = value.coerceIn(0f, 1f)
+        mainScope.launch {
+            controller?.volume = target
+            // 顺手写进状态：上报读的就是它，而音量变化不在协议「必须上报」的清单里，
+            // 只有执行指令后的那次补报——可补报发生时轮询（400ms）还没来得及同步，
+            // 报出去的会是旧值，控制端据此判断就会以为指令没生效。
+            _state.update { it.copy(volume = target) }
+        }
+    }
+
+    /**
+     * 微调播放速率（跟随同步用）。
+     *
+     * 小偏差靠调速去追比 seek 便宜得多：seek 要重新缓冲、会卡一下，而 1±0.05 的速率
+     * 听感上几乎察觉不到。用完必须复位。
+     */
+    fun setPlaybackSpeed(speed: Float) {
+        val target = speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
+        mainScope.launch { controller?.setPlaybackSpeed(target) }
+    }
+
+    /**
+     * 速率回到 1。
+     *
+     * 结束跟随、连接断开时都得调它——否则会留下一个「莫名其妙快/慢几个百分点」的播放器，
+     * 而用户根本不知道问题出在哪。
+     */
+    fun resetPlaybackSpeed() {
+        mainScope.launch { controller?.setPlaybackSpeed(1f) }
+    }
+
     fun next() {
         mainScope.launch { controller?.seekToNextMediaItem() }
     }
@@ -643,7 +688,9 @@ class PlaybackCenter(
         val request = PlayRequest(source.platform, source.id, quality)
         runCatching { resolver.resolve(request) }
             .onSuccess { result ->
-                val willBeDirect = result.direct != null && !resolver.isProxyOnly(source.platform)
+                // 和 SakuraDataSource 用同一个判断：锁了「中转」就别预告直连，
+                // 锁了「直连」也别因为历史记录就预告中转。
+                val willBeDirect = result.direct != null && resolver.mayUseDirect(source.platform)
                 // 还没开流的时候（比如刚恢复的现场）先把预解析的结论显示出来，
                 // 真连上游或命中缓存时会有更准的结果盖掉它。
                 routeTracker.reportExpected(
@@ -674,3 +721,7 @@ class PlaybackCenter(
 
 /** 轮询是 400ms 一次，这个数对应「大约每 15 秒把进度写一次本地」。 */
 private const val PERSIST_EVERY_TICKS = 37
+
+/** 跟随调速的允许范围。实际只在 1±0.05 上用，这里兜个底，防止意外的值灌进来。 */
+private const val MIN_PLAYBACK_SPEED = 0.5f
+private const val MAX_PLAYBACK_SPEED = 2f

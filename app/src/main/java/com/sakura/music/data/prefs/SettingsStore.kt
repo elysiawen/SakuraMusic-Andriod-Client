@@ -42,8 +42,12 @@ class SettingsStore(private val context: Context) {
         /** 仅在 Wi-Fi 下联网取流；移动网络下只播已缓存的歌。 */
         val WifiOnly = booleanPreferencesKey("wifi_only")
         val PreferredPlatform = stringPreferencesKey("preferred_platform")
-        /** 直连被 CDN 拒过的平台：这些平台之后一律走网关中转。 */
+        /** 直连被 CDN 拒过的平台：这些平台之后一律走网关中转（只对「智能」有用）。 */
         val ProxyOnlyPlatforms = stringSetPreferencesKey("proxy_only_platforms")
+
+        /** 每个平台的取流方式（`smart` / `direct` / `proxy`），见 [RoutePreference]。 */
+        fun routePreference(platform: Platform) =
+            stringPreferencesKey("route_preference_${platform.id}")
         val RememberedUsername = stringPreferencesKey("remembered_username")
 
         /** 搜索记录：换行分隔（关键词里的空白在存之前就被压平了，不会含换行）。 */
@@ -119,6 +123,10 @@ class SettingsStore(private val context: Context) {
     val proxyOnlyPlatforms: Flow<Set<Platform>> = context.settingsDataStore.data
         .map { prefs -> (prefs[Keys.ProxyOnlyPlatforms] ?: emptySet()).map(Platform::fromId).toSet() }
 
+    /** 某个平台的取流方式；没设过就是「智能」。 */
+    fun routePreference(platform: Platform): Flow<RoutePreference> = context.settingsDataStore.data
+        .map { RoutePreference.fromId(it[Keys.routePreference(platform)]) }
+
     val rememberedUsername: Flow<String> = context.settingsDataStore.data
         .map { it[Keys.RememberedUsername].orEmpty() }
 
@@ -157,13 +165,27 @@ class SettingsStore(private val context: Context) {
         prefs[Keys.ProxyOnlyPlatforms] = next
     }
 
+    suspend fun setRoutePreference(platform: Platform, value: RoutePreference) = edit { prefs ->
+        if (!platform.isKnown) return@edit
+        // 「智能」是默认值：删掉键就是它，不必存一份和默认一样的东西。
+        if (value == RoutePreference.Default) prefs.remove(Keys.routePreference(platform))
+        else prefs[Keys.routePreference(platform)] = value.id
+    }
+
     /**
-     * 清掉「直连不通」的记录。
+     * 忘掉某个平台「直连不通」的记录。
      *
      * 这个判断会被持久化，而触发它的原因常常是一次性的（当时网络不通、上游临时改策略），
-     * 没有出口的话，一次失败会把平台永久钉在网关中转上。
+     * 所以直连一旦真的成功就得把它抹掉，否则一次失败会把平台永久钉在网关中转上。
+     * 出口是「直连」（用户锁直连验证通过就自动清），不再需要单独的重置按钮。
      */
-    suspend fun resetProxyOnly() = edit { it.remove(Keys.ProxyOnlyPlatforms) }
+    suspend fun forgetProxyOnly(platform: Platform) = edit { prefs ->
+        if (!platform.isKnown) return@edit
+        val current = prefs[Keys.ProxyOnlyPlatforms] ?: return@edit
+        val next = current - platform.id
+        if (next.isEmpty()) prefs.remove(Keys.ProxyOnlyPlatforms)
+        else prefs[Keys.ProxyOnlyPlatforms] = next
+    }
 
     suspend fun setRememberedUsername(value: String) = edit {
         if (value.isBlank()) it.remove(Keys.RememberedUsername) else it[Keys.RememberedUsername] = value

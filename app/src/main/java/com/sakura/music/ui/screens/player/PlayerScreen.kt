@@ -51,6 +51,7 @@ import androidx.compose.material.icons.rounded.RepeatOne
 import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
+import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.FilledTonalButton
@@ -151,6 +152,7 @@ fun PlayerScreen(onCollapse: () -> Unit) {
     // 角标直接订阅路由流：上报发生在播放线程，走播放状态那条路容易漏掉更新。
     val route by container.playbackRoute.route.collectAsStateWithLifecycle()
     val playMode by container.playbackCenter.playMode.collectAsStateWithLifecycle()
+    val following by container.connectSync.following.collectAsStateWithLifecycle()
     val favorites by container.libraryRepository.favoriteKeys.collectAsStateWithLifecycle()
     val quality by container.settings.quality.collectAsStateWithLifecycle(initialValue = Quality.Default)
 
@@ -278,6 +280,40 @@ fun PlayerScreen(onCollapse: () -> Unit) {
                 }
                 Spacer(Modifier.weight(1f))
 
+                // 跟随中：在投送按钮旁边放个能直接停的开关。
+                // 跟随期间本机的操作会被下一轮同步覆盖回来，所以「退出跟随」必须触手可及，
+                // 藏进设备列表里的话，想停下来还得先进列表找到那台设备。
+                // 只画个图标不够——光看一个「同步」符号，猜不出是这台设备在跟谁走。
+                following?.let { target ->
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                        modifier = Modifier.clickable { container.connectSync.stopFollow() },
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .padding(start = 14.dp, end = 16.dp)
+                                .height(36.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.Sync,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                                modifier = Modifier.size(16.dp),
+                            )
+                            Spacer(Modifier.width(6.dp))
+                            Text(
+                                text = "跟随 ${target.name}",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onPrimaryContainer,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
                 // 投送到其它设备：同一账号下的设备互相可见，可以把播放交接过去。
                 IconButton(onClick = { showDevices = true }) {
                     Icon(
@@ -637,6 +673,13 @@ private fun TrackInfo(title: String, subtitle: String, trial: Boolean) {
         )
     }
 }
+
+/**
+ * 跟随状态的提示已从封面挪到顶栏（投送按钮左边）：封面上的角标只适合放「这一路的
+ * 字节从哪儿来」这类元信息，「我正在听谁的」是个要随时能退出的操作状态，
+ * 放在操作区更顺手。
+ */
+
 
 /**
  * 这次播放的字节从哪儿来：本地缓存 / CDN 直连 / 网关中转。

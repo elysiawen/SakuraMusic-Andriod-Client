@@ -1,6 +1,7 @@
 package com.sakura.music.core.player
 
 import android.net.Uri
+import android.os.SystemClock
 import androidx.media3.common.C
 import androidx.media3.datasource.BaseDataSource
 import androidx.media3.datasource.DataSource
@@ -9,6 +10,7 @@ import androidx.media3.datasource.HttpDataSource
 import androidx.media3.datasource.okhttp.OkHttpDataSource
 import com.sakura.music.data.network.MeteredBlockedException
 import com.sakura.music.data.network.NetworkPolicy
+import com.sakura.music.data.prefs.RoutePreference
 import okhttp3.OkHttpClient
 import java.io.IOException
 
@@ -16,12 +18,13 @@ import java.io.IOException
  * 播放队列用的数据源。
  *
  * 队列里的 URI 是 `sakura://track/<platform>/<id>?quality=…`——只有坐标，没有地址。
- * 真正的地址（直连还是走网关）在这一层打开时才解析：
+ * 真正的地址在这一层打开时才解析，走哪条路由用户的连接方式决定（每个平台单独设）：
  *
- * 1. 直连平台 CDN（服务器带宽为零），失败就
- * 2. 回退到网关代理（`/api/stream?t=…`，兼容一切情况）。
+ * - **智能**：直连平台 CDN 优先（服务器带宽为零），被拒就回退网关代理，
+ *   并记住这个平台，后续不再折腾直连；
+ * - **直连**：只走 CDN，失败直接报错，不自动改道（界面会提醒用户去设置里换）；
+ * - **中转**：只走 `/api/stream?t=…`，兼容一切情况。
  *
- * 直连失败会记住这个平台，后续不再重试直连，免得每次播放都先失败一次。
  * 代理返回 401 表示播放令牌过期，会丢掉缓存重新解析一次再试。
  *
  * 注意：这里用的是**不带会话 Cookie** 的 client。音频字节没必要带上登录态，
@@ -64,19 +67,38 @@ class SakuraDataSource(
         var retriedAfterTokenExpiry = false
 
         while (true) {
-            // 1) 直连优先。
+            // 1) 直连（用户的连接方式允许时）。
             val direct = if (triedDirect) null else resolver.directOf(resolved)
-            if (direct != null && !resolver.isProxyOnly(request.platform)) {
+            if (direct != null && resolver.mayUseDirect(request.platform)) {
                 triedDirect = true
                 val (url, headers) = direct
-                openWith(url, headers, dataSpec)?.let { length ->
-                    // 开的是平台 CDN：整首歌的字节都没经过网关。
-                    routeTracker.reportNetwork(request.cacheKey, PlaybackRoute.Direct)
-                    transferStarted(dataSpec)
-                    return length
+                // 直连自己先多试几次：CDN 的连接抖动、某个节点抽风都值得**就地**再试，
+                // 而不是一失败就改走网关——直连省的是服务器带宽，多试两下的代价只是几百毫秒。
+                var attempt = 0
+                while (attempt < DIRECT_ATTEMPTS) {
+                    attempt++
+                    val startedAt = SystemClock.elapsedRealtime()
+                    openWith(url, headers, dataSpec)?.let { length ->
+                        // 开的是平台 CDN：整首歌的字节都没经过网关。
+                        resolver.noteDirectSuccess(request.platform)
+                        routeTracker.reportNetwork(request.cacheKey, PlaybackRoute.Direct)
+                        transferStarted(dataSpec)
+                        return length
+                    }
+                    // 4xx 是「这个请求被明确拒绝」：同一地址再试还是拒，别白费时间。
+                    val refused = lastStatusCode in 400..499
+                    // 慢失败多半是超时，再试一次还得等这么久，用户等不起。
+                    val slow = SystemClock.elapsedRealtime() - startedAt > DIRECT_RETRY_MAX_WAIT_MS
+                    if (refused || slow) break
                 }
-                // 防盗链拒绝（403）或 CDN 连不上：记下来，之后这个平台走网关中转。
-                resolver.markProxyOnly(request.platform)
+                // 把失败原因一并交出去：4xx 是防盗链的明确拒绝，值得记账；
+                // 连不上、超时这类可能只是这一次不走运，不该让平台被永久钉在中转上。
+                resolver.noteDirectFailure(request.platform, request.cacheKey, lastStatusCode)
+                // 用户锁定「直连」：不背着他改道——锁了就是锁了，把失败原样抛出去，
+                // 解析层的提醒会告诉他去设置里改成「智能」或「中转」。
+                if (resolver.preferenceOf(request.platform) == RoutePreference.Direct) {
+                    throw lastError ?: IOException("直连不可用")
+                }
             }
 
             // 2) 网关代理兜底。
@@ -176,5 +198,13 @@ class SakuraDataSource(
                 routeTracker = routeTracker,
                 networkPolicy = networkPolicy,
             )
+    }
+
+    private companion object {
+        /** 直连最多试这么多次（首次 + 重试）。 */
+        const val DIRECT_ATTEMPTS = 3
+
+        /** 单次直连超过这么久就不重试了：那是超时，再试还得等这么久。 */
+        const val DIRECT_RETRY_MAX_WAIT_MS = 1_500L
     }
 }

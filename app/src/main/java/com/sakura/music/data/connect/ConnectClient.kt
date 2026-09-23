@@ -49,6 +49,19 @@ class ConnectClient(
     private val _connected = MutableStateFlow(false)
     val connected: StateFlow<Boolean> = _connected.asStateFlow()
 
+    /**
+     * 本机时钟相对服务端的偏移（毫秒）：`服务端时间 - 本机时间`。
+     *
+     * 推算「对方现在放到哪儿了」是拿本机时间去减服务端盖的 `positionAt`，两台机器的
+     * 时钟差多少，推算就整体偏多少，而且**永远不会自愈**。所以每次广播都重新对一次表。
+     */
+    @Volatile
+    var serverOffsetMillis: Long = 0L
+        private set
+
+    /** 服务端**此刻**的时间（毫秒）。跟随推算用这个，而不是本机挂钟。 */
+    val serverTimeNow: Long get() = System.currentTimeMillis() + serverOffsetMillis
+
     /** 收到的控制指令。播放器那边订阅它来执行。 */
     private val _commands = MutableSharedFlow<CommandEvent>(extraBufferCapacity = 16)
     val commands: SharedFlow<CommandEvent> = _commands.asSharedFlow()
@@ -56,9 +69,13 @@ class ConnectClient(
     /**
      * SSE 用的 client。
      *
-     * 读超时给 45 秒，比服务端 25 秒的心跳宽一截：正常时每 25 秒被心跳刷新一次，
-     * 而连接「半死」（网络断了但 TCP 还没断）时 45 秒收不到任何字节就会超时，
-     * 我们据此重连——这正是协议要求的那个看门狗，不必自己数时间。
+     * 读超时按协议建议的 60 秒，比服务端 25 秒的心跳宽出一大截：正常时每 25 秒被
+     * 心跳刷新一次，而连接「半死」（网络断了但 TCP 还没断）时 60 秒收不到任何字节
+     * 就会超时，我们据此重连——这正是协议要求的那个看门狗，不必自己数时间。
+     *
+     * 别把它压得太紧：中间代理只要缓冲掉一次心跳，或者网关事件循环稍微卡一下，
+     * 就会被误判成「连接已死」而白白重连一次——每重连一次，设备列表里就会
+     * 表演一次「掉线又上线」。
      *
      * 不能给成无限：那样半死的连接会一直挂着，设备列表不更新、指令也收不到。
      * 其余设置（Cookie、连接超时等）沿用传入的 client。
@@ -172,10 +189,16 @@ class ConnectClient(
             when (type) {
                 // hello 与 devices 都是全量列表，处理方式一样，区别只是 hello 还带自己的 id。
                 "hello" -> runCatching { json.decodeFromString(HelloEvent.serializer(), data) }
-                    .onSuccess { _devices.value = it.devices }
+                    .onSuccess {
+                        syncClock(it.serverNow)
+                        _devices.value = it.devices
+                    }
 
                 "devices" -> runCatching { json.decodeFromString(DevicesEvent.serializer(), data) }
-                    .onSuccess { _devices.value = it.devices }
+                    .onSuccess {
+                        syncClock(it.serverNow)
+                        _devices.value = it.devices
+                    }
 
                 "command" -> runCatching { json.decodeFromString(CommandEvent.serializer(), data) }
                     .onSuccess {
@@ -202,6 +225,12 @@ class ConnectClient(
     }
 
     /** 指数退避（1s 起、30s 封顶）。 */
+    /** 用服务端带的时间对一次表。单程延迟只有几毫秒，这个精度够跟随用了。 */
+    private fun syncClock(serverNow: Long?) {
+        if (serverNow == null) return
+        serverOffsetMillis = serverNow - System.currentTimeMillis()
+    }
+
     private fun scheduleRetry() {
         if (!running.get()) return
         retryJob?.cancel()
@@ -231,8 +260,14 @@ class ConnectClient(
     private companion object {
         const val MAX_RETRY_SECONDS = 30
 
-        /** 服务端心跳是 25 秒一次，这里留出余量。 */
-        const val SSE_READ_TIMEOUT_SECONDS = 45L
+        /**
+         * 服务端心跳是 25 秒一次，这里按协议建议的 60 秒留出余量。
+         *
+         * 45 秒（余量只有 20 秒）太紧：中间代理只要缓冲掉一次心跳，或者网关事件
+         * 循环稍微卡一下就会被误判成「连接已死」而白白重连一次 —— 每重连一次，
+         * 设备列表里就会表演一次「掉线又上线」。
+         */
+        const val SSE_READ_TIMEOUT_SECONDS = 60L
     }
 }
 

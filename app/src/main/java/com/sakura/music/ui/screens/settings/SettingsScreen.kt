@@ -53,6 +53,7 @@ import com.sakura.music.data.cache.CacheUsage
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.prefs.PlayMode
+import com.sakura.music.data.prefs.RoutePreference
 import com.sakura.music.data.prefs.SettingsStore
 import com.sakura.music.data.prefs.ThemeMode
 import com.sakura.music.ui.appContainer
@@ -75,7 +76,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 private enum class SheetKind {
-    Quality, PlayMode, Platform, LyricTtl, MetaTtl,
+    Quality, PlayMode, Platform, LyricTtl, MetaTtl, RouteNetease, RouteQq,
 }
 
 /**
@@ -97,7 +98,10 @@ fun SettingsScreen(navigator: SakuraNavigator) {
     val mixWithOthers by container.settings.mixWithOthers.collectAsStateWithLifecycle(initialValue = false)
     val wifiOnly by container.settings.wifiOnly.collectAsStateWithLifecycle(initialValue = false)
     val preferredPlatform by container.settings.preferredPlatform.collectAsStateWithLifecycle(initialValue = null)
-    val proxyOnly by container.settings.proxyOnlyPlatforms.collectAsStateWithLifecycle(initialValue = emptySet())
+    val neteaseRoute by container.settings.routePreference(Platform.NETEASE)
+        .collectAsStateWithLifecycle(initialValue = RoutePreference.Default)
+    val qqRoute by container.settings.routePreference(Platform.QQ)
+        .collectAsStateWithLifecycle(initialValue = RoutePreference.Default)
     val gatewayUrl by container.settings.gatewayUrl.collectAsStateWithLifecycle()
     val audioCacheMb by container.settings.audioCacheMb
         .collectAsStateWithLifecycle(initialValue = SettingsStore.DEFAULT_AUDIO_CACHE_MB)
@@ -214,23 +218,6 @@ fun SettingsScreen(navigator: SakuraNavigator) {
             SectionHeader("网络")
             SakuraCard {
                 SettingRow(
-                    title = "直连失败记录",
-                    subtitle = if (proxyOnly.isEmpty()) {
-                        "当前所有平台都会先尝试直连 CDN（省服务器带宽）"
-                    } else {
-                        "这些平台已改走网关中转：${proxyOnly.joinToString("、") { it.label }}"
-                    },
-                    onClick = { scope.launch { container.settings.resetProxyOnly() } },
-                    trailing = {
-                        Text(
-                            text = "重置",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = MaterialTheme.colorScheme.primary,
-                        )
-                    },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingRow(
                     title = "网关地址",
                     subtitle = gatewayUrl,
                     onClick = { showGateway = true },
@@ -241,6 +228,22 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                             color = MaterialTheme.colorScheme.primary,
                         )
                     },
+                )
+                // 两个平台被防盗链卡住的程度不一样，所以分开设：一个省带宽、一个要稳，
+                // 共用一个开关必然有一边要将就。
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "网易云连接方式",
+                    subtitle = neteaseRoute.hint,
+                    onClick = { openSheet = SheetKind.RouteNetease },
+                    trailing = { ValueText(neteaseRoute.label) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "QQ 音乐连接方式",
+                    subtitle = qqRoute.hint,
+                    onClick = { openSheet = SheetKind.RouteQq },
+                    trailing = { ValueText(qqRoute.label) },
                 )
             }
 
@@ -387,6 +390,20 @@ fun SettingsScreen(navigator: SakuraNavigator) {
             onDismiss = { openSheet = null },
         )
 
+        SheetKind.RouteNetease -> RouteChoiceSheet(
+            title = "网易云连接方式",
+            selected = neteaseRoute,
+            onSelect = { scope.launch { container.settings.setRoutePreference(Platform.NETEASE, it) } },
+            onDismiss = { openSheet = null },
+        )
+
+        SheetKind.RouteQq -> RouteChoiceSheet(
+            title = "QQ 音乐连接方式",
+            selected = qqRoute,
+            onSelect = { scope.launch { container.settings.setRoutePreference(Platform.QQ, it) } },
+            onDismiss = { openSheet = null },
+        )
+
         SheetKind.LyricTtl -> ChoiceSheet(
             title = "歌词保留时间",
             options = CacheManager.LYRIC_TTL_CHOICES,
@@ -511,6 +528,28 @@ private fun CacheLimitSlider(
 
 /** 有效期的文案：`7 天` / `永久`。 */
 private fun daysLabel(days: Int): String = if (days < 0) "永久" else "$days 天"
+
+/**
+ * 连接方式弹层：三个选项的标题和说明都由枚举自己带来，两个平台共用这一点包装。
+ * 说明文字不能省——「直连」和「中转」的取舍（省带宽 vs 稳）光看名字看不出来。
+ */
+@Composable
+private fun RouteChoiceSheet(
+    title: String,
+    selected: RoutePreference,
+    onSelect: (RoutePreference) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    ChoiceSheet(
+        title = title,
+        options = RoutePreference.entries,
+        selected = selected,
+        optionLabel = { it.label },
+        optionSubtitle = { it.hint },
+        onSelect = onSelect,
+        onDismiss = onDismiss,
+    )
+}
 
 @Composable
 private fun ValueText(text: String) {
