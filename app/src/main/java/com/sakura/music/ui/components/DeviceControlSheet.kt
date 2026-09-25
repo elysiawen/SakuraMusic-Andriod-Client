@@ -150,13 +150,14 @@ fun DeviceControlSheet(
             if (state == null || track == null) {
                 Spacer(Modifier.height(14.dp))
                 Text(
-                    text = "这台设备没有在放东西。可以把本机的播放交给它，或让它继续上次的队列。",
+                    text = "这台设备没有在放东西。可以把本机的播放交给它，或让它跟随本机。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 24.dp),
                 )
             } else {
                 /* ------------------------------ 进度 ------------------------------ */
+                // 进度只能绑在「它手里有东西」上：没内容就没有进度可言。
                 val durationSec = state.duration.toFloat().coerceAtLeast(0f)
                 val shown = scrubbing ?: livePositionSeconds(state, now).toFloat()
                 Spacer(Modifier.height(8.dp))
@@ -189,42 +190,46 @@ fun DeviceControlSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            }
 
-                /* ------------------------------ 音量 ------------------------------ */
-                // 音量是**设备**的属性，不是内容的：同一份播放状态在各台设备上可以不一样，
-                // 所以它跟着设备走，也是跟随时唯一不该同步的东西。
-                val volume = volumeDraft ?: (state.volume?.toFloat() ?: 1f)
-                Spacer(Modifier.height(6.dp))
-                Row(
+            /*
+             * 音量是**设备**的属性，不是内容的：同一份播放状态在各台设备上可以不一样，
+             * 所以它跟着设备走，也是跟随时唯一不该同步的东西。
+             *
+             * 但也正因为它属于设备而不是内容，**空着的设备一样有音量可调** ——
+             * 它只是没在放歌，不代表不需要合适的响度。所以这一行不跟着「有内容」藏起来。
+             */
+            val volume = volumeDraft ?: (state?.volume?.toFloat() ?: 1f)
+            Spacer(Modifier.height(6.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    imageVector = if (volume <= 0.01f) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
+                    contentDescription = "音量",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(20.dp),
+                )
+                Slider(
+                    value = volume.coerceIn(0f, 1f),
+                    onValueChange = { volumeDraft = it },
+                    onValueChangeFinished = {
+                        volumeDraft?.let { fire("volume", volumePayload(it.toDouble())) }
+                        volumeDraft = null
+                    },
+                    valueRange = 0f..1f,
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 24.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Icon(
-                        imageVector = if (volume <= 0.01f) Icons.Rounded.VolumeOff else Icons.Rounded.VolumeUp,
-                        contentDescription = "音量",
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.size(20.dp),
-                    )
-                    Slider(
-                        value = volume.coerceIn(0f, 1f),
-                        onValueChange = { volumeDraft = it },
-                        onValueChangeFinished = {
-                            volumeDraft?.let { fire("volume", volumePayload(it.toDouble())) }
-                            volumeDraft = null
-                        },
-                        valueRange = 0f..1f,
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(horizontal = 10.dp),
-                    )
-                    Text(
-                        text = "${(volume.coerceIn(0f, 1f) * 100).roundToInt()}%",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                        .weight(1f)
+                        .padding(horizontal = 10.dp),
+                )
+                Text(
+                    text = "${(volume.coerceIn(0f, 1f) * 100).roundToInt()}%",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
 
             /* ------------------------------ 传输控制 ------------------------------ */
@@ -269,9 +274,8 @@ fun DeviceControlSheet(
                 )
             }
 
+            // 接管需要它手里确实有东西可搬。
             if (track != null) {
-                // 它正跟着本机吗？这个状态同时决定「跟随这台设备」要不要显示。
-                val followsMe = state?.following == selfId
                 ControlRow(
                     icon = Icons.Rounded.Devices,
                     title = "接管它的播放",
@@ -289,40 +293,48 @@ fun DeviceControlSheet(
                         }
                     },
                 )
+            }
 
-                val isFollowing = following?.deviceId == device.deviceId
-                /*
-                 * 跟随的两个方向**互斥显示**：任意时刻最多出现一个跟随动作。
-                 *
-                 * 不是省地方——是两个选项同时摆出来时，用户可以点出一个**注定无效**的组合：
-                 * 本机跟着它、再让它跟着本机，就是互指。协议层会拒绝这种 follow
-                 * （对方的 canFollow 拦下），但拒绝是静默的，界面上只会表现成「没反应」。
-                 * 所以谁的方向被占着，就只显示谁的动作；想换方向，先停掉当前那个。
-                 */
-                when {
-                    isFollowing -> ControlRow(
-                        icon = Icons.Rounded.Close,
-                        title = "停止跟随",
-                        subtitle = "本机不再跟着「${device.name}」走",
-                        onClick = {
-                            container.connectSync.stopFollow()
-                            onMessage("已停止跟随「${device.name}」")
-                        },
-                    )
+            val isFollowing = following?.deviceId == device.deviceId
+            // 它正跟着本机吗？这个状态同时决定「跟随这台设备」要不要显示。
+            val followsMe = state?.following == selfId
+            /*
+             * 跟随的两个方向**互斥显示**：任意时刻最多出现一个跟随动作。
+             *
+             * 不是省地方——是两个选项同时摆出来时，用户可以点出一个**注定无效**的组合：
+             * 本机跟着它、再让它跟着本机，就是互指。协议层会拒绝这种 follow
+             * （对方的 canFollow 拦下），但拒绝是静默的，界面上只会表现成「没反应」。
+             * 所以谁的方向被占着，就只显示谁的动作；想换方向，先停掉当前那个。
+             *
+             * 这里也刻意不要求它「有内容」：本机正跟着它、或它正跟着本机时，解除的入口
+             * 必须一直在 —— 它一停下来（track 变空）就把入口藏掉的话，用户没有别的办法脱身。
+             */
+            when {
+                isFollowing -> ControlRow(
+                    icon = Icons.Rounded.Close,
+                    title = "停止跟随",
+                    subtitle = "本机不再跟着「${device.name}」走",
+                    onClick = {
+                        container.connectSync.stopFollow()
+                        onMessage("已停止跟随「${device.name}」")
+                    },
+                )
 
-                    followsMe -> ControlRow(
-                        icon = Icons.Rounded.Close,
-                        title = "让它别跟着我",
-                        subtitle = "它正在镜像本机的播放",
-                        onClick = {
-                            scope.launch {
-                                val result = container.connectSync.remote(device.deviceId, "unfollow")
-                                onMessage(followMessage(device.name, true, result))
-                            }
-                        },
-                    )
+                followsMe -> ControlRow(
+                    icon = Icons.Rounded.Close,
+                    title = "让它别跟着我",
+                    subtitle = "它正在镜像本机的播放",
+                    onClick = {
+                        scope.launch {
+                            val result = container.connectSync.remote(device.deviceId, "unfollow")
+                            onMessage(followMessage(device.name, true, result))
+                        }
+                    },
+                )
 
-                    else -> {
+                else -> {
+                    // 「跟随这台设备」要它手上有内容：镜像一个空的东西没有意义。
+                    if (track != null) {
                         ControlRow(
                             icon = Icons.Rounded.Sync,
                             title = "跟随这台设备",
@@ -334,18 +346,19 @@ fun DeviceControlSheet(
                                 onDismiss()
                             },
                         )
-                        ControlRow(
-                            icon = Icons.Rounded.Sync,
-                            title = "让它跟随我",
-                            subtitle = "跟不跟由它决定，它随时可以自己停掉",
-                            onClick = {
-                                scope.launch {
-                                    val result = container.connectSync.remote(device.deviceId, "follow")
-                                    onMessage(followMessage(device.name, false, result))
-                                }
-                            },
-                        )
                     }
+                    // 「让它跟随我」不受此限：它空着正好，本机一放它就跟上。
+                    ControlRow(
+                        icon = Icons.Rounded.Sync,
+                        title = "让它跟随我",
+                        subtitle = "跟不跟由它决定，它随时可以自己停掉",
+                        onClick = {
+                            scope.launch {
+                                val result = container.connectSync.remote(device.deviceId, "follow")
+                                onMessage(followMessage(device.name, false, result))
+                            }
+                        },
+                    )
                 }
             }
         }

@@ -104,7 +104,15 @@ class ConnectSync(
         // 状态真的变了才报：一次切歌会连着改好几个字段，合并一下别发三遍。
         scope.launch {
             playback.state
-                .map { Snapshot(playing = it.isPlaying, index = it.index, key = it.current?.key, queue = it.queue.size) }
+                .map {
+                    Snapshot(
+                        playing = it.isPlaying,
+                        index = it.index,
+                        key = it.current?.key,
+                        queue = it.queue.size,
+                        volume = it.volume,
+                    )
+                }
                 .distinctUntilChanged()
                 .collectLatest {
                     delay(CHANGE_DEBOUNCE_MS)
@@ -230,6 +238,11 @@ class ConnectSync(
         val index: Int,
         val key: String?,
         val queue: Int,
+        /**
+         * 音量不参与跟随同步（各设备的输出音量各自管），但它要显示在别的设备的
+         * 面板上，所以本机一调就得报一次——漏了的话对方看到的永远是旧值。
+         */
+        val volume: Float,
     )
 
     /* ------------------------------ 收指令 ------------------------------ */
