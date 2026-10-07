@@ -54,6 +54,21 @@ data class PlaybackState(
     val trial: Boolean = false,
     /** true = 直连平台 CDN，false = 字节经网关转发。这是**预先**判断的结果。 */
     val usingDirect: Boolean = false,
+    /**
+     * 当前这一首**实际拿到**的档位。网关会降级（会员等级不够时"按能给的给"），
+     * 所以它可能低于设置里的偏好——界面上说「当前音质」用的是这个，不是偏好。
+     * `null` = 还没解析出来，此时别显示「当前音质」。
+     */
+    val actualQuality: Quality? = null,
+    /**
+     * 当前这一首**已知存在**的档位；`null` = 清单完全不知道（网关没给 `qualities` 字段），
+     * 此时界面按全量档位列。
+     *
+     * 注意它未必**完整**：网易云的搜索与歌单只带基础档，补一次单曲详情才会齐。
+     * 但"不完整"与"不知道"是两回事——不完整时列表里的每一条都是真的存在，
+     * 所以照样只列这些，宁可暂时少列，也不显示本曲其实没有的档位。
+     */
+    val qualityOptions: List<Quality>? = null,
     /** 当前这一首实际用的音源平台（偏好音源命中时可能不是 `sources[0]`）。 */
     val activePlatform: Platform? = null,
     val lyric: List<LyricLine> = emptyList(),
@@ -131,6 +146,14 @@ class PlaybackCenter(
     private var quality: Quality = Quality.Default
     private var preferredPlatform: Platform? = null
     private var pollJob: Job? = null
+
+    /**
+     * 已经提示过的降级组合（`请求档位>实际档位`）。
+     *
+     * 同一种只提示一次：会员等级不够的账号**每一首**都会降到同一档，每首都弹一句就成了骚扰。
+     * 提示过之后，界面上的「正在播放」标记仍然会一直在音质弹层里显示，信息没有丢。
+     */
+    private val notifiedDowngrades = mutableSetOf<String>()
 
     init {
         scope.launch {
@@ -312,6 +335,12 @@ class PlaybackCenter(
             it.copy(
                 error = null,
                 trial = false,
+                // 上一首的档位结论不能留给下一首：解析出来之前谁也不知道新的一首会降到哪。
+                actualQuality = null,
+                // 曲目自带清单的话当场就能筛，不能等异步那一步——否则刚换歌时打开音质弹层，
+                // 会短暂把「本曲其实没有的档位」也列出来。清单不完整时这里拿到的是已知的那几档
+                // （都是真的存在），完整的清单随后由 syncQualityOptions 补上。
+                qualityOptions = track.availableQualities,
                 lyric = emptyList(),
                 lyricLoading = false,
                 activePlatform = platform,
@@ -322,6 +351,9 @@ class PlaybackCenter(
             loadLyrics(track)
             primeResolve(track)
         }
+        // 补档位清单要额外打一次单曲详情，和上面两件事互不依赖，单独一个协程——
+        // 排在 primeResolve 后面的话，它会白白多等一次网络往返。
+        mainScope.launch { syncQualityOptions(track) }
         // 顺手把封面存到本地：等真要离线听了再去取就来不及了。
         scope.launch { cacheManager.warmUpCover(track.album.cover) }
         scope.launch { runCatching { library.recordPlay(track) } }
@@ -701,8 +733,15 @@ class PlaybackCenter(
                     it.copy(
                         trial = result.trial,
                         usingDirect = willBeDirect,
+                        // 显示「当前音质」用它：网关会把请求档位降级，回显的 quality 只是请求值。
+                        actualQuality = result.effectiveQuality,
                     )
                 }
+                notifyQualityDowngrade(
+                    requested = request.quality,
+                    actual = result.effectiveQuality,
+                    trial = result.trial,
+                )
             }
             .onFailure { error ->
                 // 解析不出来时先给一句提示；真正的播放失败还会再由 ExoPlayer 报一次。
@@ -712,6 +751,47 @@ class PlaybackCenter(
                     _state.update { it.copy(error = error.friendlyMessage()) }
                 }
             }
+    }
+
+    /**
+     * 请求的档位没拿到、网关降级给了另一档时提示一次。
+     *
+     * 两个平台降级时都**不报错**（网易云「按能给的给」，QQ 按 `file_type` 链逐个重试），
+     * 不提示的话用户会一直以为自己在听无损/母带——这正是文档点名要避免的那件事。
+     *
+     * 不提示的三种情况：
+     * - `actual` 为空：网关没回报实际档位，无从判断，不能凭空说「降级了」；
+     * - `trial` 为真：只能听试听片段时播放页已有专门的角标，再叠一句降级提示只是噪音；
+     * - 没在播：冷启动恢复出来的现场也会预解析一次，那时候弹「已按 X 播放」是提前报信。
+     *   没在播时这条信息由音质弹层里的「正在播放」标记承担，一样看得到。
+     */
+    private fun notifyQualityDowngrade(requested: Quality, actual: Quality?, trial: Boolean) {
+        if (actual == null || actual == requested || trial) return
+        if (controller?.playWhenReady != true) return
+        if (!notifiedDowngrades.add("${requested.id}>${actual.id}")) return
+        _notice.value = "「${requested.label}」暂不可用，已按「${actual.label}」播放"
+    }
+
+    /**
+     * 补全当前曲目的档位清单。
+     *
+     * 搜索与歌单里的网易云曲目只带基础档（`qualitiesComplete` 为 false），照着筛选项会把用户
+     * 其实拥有的高阶档藏起来，所以补一次单曲详情——它的 `qualities` 是完整的。
+     * 详情走元数据缓存，同一首歌重播不会再打上游。
+     *
+     * 清单本来就完整时 [onTrackChanged] 当场就填好了，这里不必多此一举。
+     */
+    private suspend fun syncQualityOptions(track: UnifiedTrack) {
+        if (track.qualitiesAuthoritative) return
+        val source = track.sourceOf(preferredPlatform ?: Platform.UNKNOWN) ?: track.primarySource ?: return
+        val detail = runCatching { api.track(source.platform, source.id) }.getOrNull()?.track ?: return
+        // 详情也可能不完整（上游没给全）：那就别覆盖手上那份已知的清单——不能拿一份
+        // "同样不全、而且还是另一份"的清单换掉它。
+        if (!detail.qualitiesAuthoritative) return
+        val complete = detail.availableQualities ?: return
+        // 补详情期间可能已经换歌：别把上一首的档位盖到当前曲目上。
+        if (_state.value.current?.key != track.key) return
+        _state.update { it.copy(qualityOptions = complete) }
     }
 
     fun clearError() {

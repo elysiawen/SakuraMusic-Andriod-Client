@@ -20,6 +20,13 @@ class ApiException(
     /** 上游不可用（网易云 / QQ 音乐挂了或没权限）。 */
     val isUpstreamError: Boolean get() = status == 502 || code == "upstream_error"
 
+    /**
+     * 当前这一档确实没有可用播放地址（网关的 `404` + `upstream_error`）。
+     *
+     * 和别的上游失败的区别在于它是**换一档就能解决**的，所以提示文案要给个出口。
+     */
+    val isNoPlayableQuality: Boolean get() = status == 404 && code == "upstream_error"
+
     /** 连不上网关：地址填错了、服务没起、或者不在同一个网络里。 */
     val isNetworkError: Boolean get() = code == "network_error"
 
@@ -47,6 +54,11 @@ fun ApiException.userFacingMessage(): String = when {
     isUnauthorized -> "登录已过期，请重新登录"
     isStreamTokenExpired -> "播放地址已过期，正在重新获取"
     code == "credential_required" -> "该平台账号尚未绑定，请先在网页端或桌面端完成扫码绑定"
+
+    // 网关只说「当前音质下没有可用播放地址」，不给下一步：用户容易以为这首歌根本放不了
+    // 而直接跳过——其实降到无损往往就能听，所以这里必须把出口写出来。
+    isNoPlayableQuality -> "$message\n可在「音质」里换一档再试"
+
     isUpstreamError && looksLikeCredentialIssue(message) ->
         "$message\n（若尚未绑定第三方账号，请先在网页端或桌面端扫码绑定）"
 

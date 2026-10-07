@@ -161,7 +161,7 @@ fun SettingsScreen(navigator: SakuraNavigator) {
             SakuraCard {
                 SettingRow(
                     title = "音质",
-                    subtitle = "拿不到指定档位时网关会自动降级",
+                    subtitle = "拿不到指定档位时网关自动降级，播放页显示实际拿到的档位",
                     onClick = { openSheet = SheetKind.Quality },
                     trailing = {
                         Text(
@@ -362,7 +362,10 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                     Quality.STANDARD -> "大多数账号都可用"
                     Quality.HIGH -> "默认档位，无明显音质损失"
                     Quality.LOSSLESS -> "需要平台会员"
-                    Quality.HIRES -> "需要平台会员，且上游支持"
+                    Quality.HIRES -> "需要平台会员，且只有网易云有"
+                    Quality.SPATIAL -> "高清臻音，需要对应等级的会员"
+                    Quality.MASTER -> "超清母带，需要对应等级的会员"
+                    Quality.SURROUND -> "沉浸环绕声，需要对应等级的会员"
                 }
             },
             onSelect = { scope.launch { container.settings.setQuality(it) } },

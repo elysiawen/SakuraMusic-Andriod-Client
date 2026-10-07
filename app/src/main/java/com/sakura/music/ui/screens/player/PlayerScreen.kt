@@ -518,10 +518,20 @@ fun PlayerScreen(onCollapse: () -> Unit) {
     if (showQuality) {
         ChoiceSheet(
             title = "音质",
-            options = Quality.entries,
+            // 只列本曲**实际有**的档位，没有的不列出来打灰。`qualityOptions` 为空列表之外的
+            // null 代表「清单完全不知道」（网关没给 qualities），那种情况才按全量列。
+            options = state.qualityOptions ?: Quality.entries,
+            // 勾在哪儿代表「之后要用哪一档」——改的是偏好。
             selected = quality,
             optionLabel = { it.label },
-            optionSubtitle = { option -> if (option == quality) "当前档位" else null },
+            optionSubtitle = { option ->
+                // 偏好与实际可能不是一回事：网易云拿不到某一档时不报错，而是"按能给的给"，
+                // 所以「正在播放」只能看 resolve 回来的实际档位，不能照偏好写。
+                listOfNotNull(
+                    "当前设置".takeIf { option == quality },
+                    "正在播放".takeIf { option == state.actualQuality },
+                ).joinToString(" · ").ifEmpty { null }
+            },
             // 改的是偏好：PlaybackCenter 监听到之后会按新档位重建队列并接回进度。
             onSelect = { scope.launch { container.settings.setQuality(it) } },
             onDismiss = { showQuality = false },
@@ -534,7 +544,8 @@ fun PlayerScreen(onCollapse: () -> Unit) {
             isFavorite = isFavorite,
             activePlatform = state.activePlatform ?: Platform.UNKNOWN,
             onDismiss = { showActions = false },
-            qualityLabel = quality.label,
+            // 这一行写的是「当前」，所以用实际拿到的档位；还没解析出来时退回偏好（最接近的已知值）。
+            qualityLabel = (state.actualQuality ?: quality).label,
             onPickQuality = { showQuality = true },
             onToggleFavorite = {
                 scope.launch {

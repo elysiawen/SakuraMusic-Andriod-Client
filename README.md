@@ -10,7 +10,7 @@ Sakura Music 的 Android 客户端。Kotlin + Jetpack Compose + Media3（ExoPlay
 - 音源：网易云音乐 / QQ 音乐（经自建网关）
 
 多设备那套协议的细节（设备身份、SSE 事件、`transfer` / `release` 时序）见
-[`connect-protocol.md`](connect-protocol.md)。
+[`docs/connect-protocol.md`](docs/connect-protocol.md)。
 
 ## 构建
 

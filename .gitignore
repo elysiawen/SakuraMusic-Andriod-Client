@@ -22,3 +22,5 @@ keystore/
 *.keystore
 keystore.properties
 keystore.b64.txt
+
+docs/

@@ -41,19 +41,34 @@ object PlatformSerializer : KSerializer<Platform> {
     override fun serialize(encoder: Encoder, value: Platform) = encoder.encodeString(value.id)
 }
 
-/** 音质档位。请求用枚举，响应里的 `quality` 用字符串（网关会降级到未知档位）。 */
+/**
+ * 音质档位，共 7 档。
+ *
+ * 两家各只有其中几档：`hires`（Hi-Res）**只有网易云有**，QQ 音乐的最高档直接是母带；
+ * 后三档（高清臻音 / 超清母带 / 沉浸环绕声）两边都有，但**都需要对应等级的会员**。
+ * 等级不够时网关不报错，而是降级「按能给的给」，实际拿到的档位见 [PlayResolveResult.actualQuality]。
+ *
+ * 请求用枚举，响应里的档位用字符串（网关可能降级到本枚举之外的档位）。
+ */
 @Serializable(with = QualitySerializer::class)
 enum class Quality(val id: String, val label: String) {
     STANDARD("standard", "标准"),
-    HIGH("high", "高品"),
+    HIGH("high", "极高"),
     LOSSLESS("lossless", "无损"),
-    HIRES("hires", "Hi-Res");
+    HIRES("hires", "Hi-Res"),
+    SPATIAL("spatial", "高清臻音"),
+    MASTER("master", "超清母带"),
+    SURROUND("surround", "沉浸环绕声");
 
     companion object {
         val Default = HIGH
 
-        fun fromId(id: String?): Quality =
-            entries.firstOrNull { it.id.equals(id?.trim(), ignoreCase = true) } ?: Default
+        /** 发请求时用：认不出就回落到 [Default]，请求必须带一个合法档位。 */
+        fun fromId(id: String?): Quality = fromIdOrNull(id) ?: Default
+
+        /** 解析响应里带回来的档位：认不出返回 null——不能凭空造出一个档位。 */
+        fun fromIdOrNull(id: String?): Quality? =
+            entries.firstOrNull { it.id.equals(id?.trim(), ignoreCase = true) }
     }
 }
 
@@ -150,6 +165,18 @@ data class UnifiedTrack(
     val sources: List<TrackSource> = emptyList(),
     /** 是否付费 / 会员专享。 */
     val vip: Boolean? = null,
+    /**
+     * 这首歌**实际上架**的档位（不是 [Quality] 里的全量枚举）。
+     * 缺省 = 不知道，此时界面按全量档位展示；有值时应当只列这里出现的档位，别把没有的列出来打灰。
+     */
+    val qualities: List<String>? = null,
+    /** 各档的文件大小（字节），键同 [qualities]；缺省 = 不知道（不要当成 0 字节显示）。 */
+    val qualitySizes: Map<String, Long>? = null,
+    /**
+     * [qualities] 是否**完整**。QQ 曲目一拿到就完整；网易云的搜索与歌单只带基础档，
+     * 高级档要单曲详情才知道——此时为 `false`，可在播放时补一次单曲详情。
+     */
+    val qualitiesComplete: Boolean? = null,
     /** 只有播放历史里会带上。 */
     val playedAt: String? = null,
 ) {
@@ -160,6 +187,19 @@ data class UnifiedTrack(
 
     fun sourceOf(platform: Platform): TrackSource? =
         sources.firstOrNull { it.platform == platform }
+
+    /** 这首实际上架的档位（已解析成枚举、忽略认不出的值）；不知道时为 null。 */
+    val availableQualities: List<Quality>?
+        get() = qualities?.mapNotNull(Quality::fromIdOrNull)?.distinct()?.takeIf { it.isNotEmpty() }
+
+    /**
+     * [availableQualities] 能不能直接当作「全部可选项」。
+     *
+     * 只有清单完整时才敢拿它筛选项：不完整时（网易云的搜索与歌单）照着筛会把用户其实
+     * 拥有的高阶档藏起来，那比多列几个更糟。
+     */
+    val qualitiesAuthoritative: Boolean
+        get() = qualitiesComplete == true && availableQualities != null
 }
 
 /* ------------------------------ 歌单 / 榜单 ------------------------------ */
@@ -344,13 +384,23 @@ data class DirectStream(
 data class PlayResolveResult(
     /** 网关代理地址（相对路径），字节经服务器转发。 */
     val url: String = "",
-    /** 网关实际给出的档位，可能是降级后的值，因此按字符串收。 */
+    /** **请求**的档位，原样回显。 */
     val quality: String = "",
+    /**
+     * **实际拿到**的档位，降级时与 [quality] 不同。
+     *
+     * 网易云拿不到某一档时不报错，而是「按能给的给」（请求沉浸环绕声可能实际给高清臻音），
+     * 所以 UI 上显示「当前音质」**必须用它**，照 [quality] 显示会把「正在听无损」说成「沉浸环绕声」。
+     */
+    val actualQuality: String = "",
     /** 只能听到试听片段（受版权或会员限制）。 */
     val trial: Boolean = false,
     /** 直连地址：客户端自己向 CDN 取流，服务器不占音频带宽。 */
     val direct: DirectStream? = null,
-)
+) {
+    /** 实际拿到的档位；网关没给或认不出时为 null（那就别显示「当前音质」）。 */
+    val effectiveQuality: Quality? get() = Quality.fromIdOrNull(actualQuality)
+}
 
 @Serializable
 data class LyricResult(
