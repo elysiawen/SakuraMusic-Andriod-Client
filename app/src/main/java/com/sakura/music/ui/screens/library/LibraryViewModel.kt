@@ -119,9 +119,11 @@ class LibraryViewModel(
         _state.update { it.copy(loading = false, error = error.friendlyMessage()) }
     }
 
-    fun createPlaylist(name: String) {
+    fun createPlaylist(name: String, description: String) {
         viewModelScope.launch {
-            runCatching { library.createPlaylist(name.trim(), null) }
+            // 描述留空就整个不带：新建时没写描述，没必要提交一个空串。
+            val note = description.trim().takeIf { it.isNotEmpty() }
+            runCatching { library.createPlaylist(name.trim(), note) }
                 .onSuccess { created ->
                     loadedTabs += LibraryTab.Playlists
                     _state.update {
@@ -135,16 +137,28 @@ class LibraryViewModel(
         }
     }
 
-    fun renamePlaylist(playlist: Playlist, name: String) {
+    /**
+     * 改这个歌单的名称与描述。
+     *
+     * 描述按**当前值**一起提交，不是省略：用户在弹窗里清空了文本，那这里就该真的清掉。
+     * 两个字段走同一次 `PATCH`，不会出现「名称改了、描述没改」这种只对了一半的歌单。
+     */
+    fun updatePlaylistInfo(playlist: Playlist, name: String, description: String) {
+        val newName = name.trim()
+        val newDescription = description.trim()
         viewModelScope.launch {
-            runCatching { library.updatePlaylist(playlist.id, name.trim(), null) }
+            runCatching { library.updatePlaylist(playlist.id, newName, newDescription) }
                 .onSuccess {
                     _state.update { current ->
                         current.copy(
                             playlists = current.playlists.map {
-                                if (it.id == playlist.id) it.copy(name = name.trim()) else it
+                                if (it.id == playlist.id) {
+                                    it.copy(name = newName, description = newDescription)
+                                } else {
+                                    it
+                                }
                             },
-                            message = "已重命名",
+                            message = "歌单信息已更新",
                         )
                     }
                 }

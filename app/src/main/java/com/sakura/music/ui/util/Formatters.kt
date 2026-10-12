@@ -66,6 +66,25 @@ fun formatBytes(bytes: Long): String {
     }
 }
 
+/**
+ * 一整张列表的总时长：`3 小时 40 分` / `24 分 12 秒`。
+ *
+ * 和 [formatDuration] 不同：那个是给进度条用的 `mm:ss`，这个是要读出来的一句话。
+ * 时长为 0（一首都没拿到）时返回空串，调用方据此决定要不要写这一段。
+ */
+fun formatTotalDuration(millis: Long): String {
+    if (millis <= 0) return ""
+    val totalSeconds = millis / 1000
+    val hours = totalSeconds / 3600
+    val minutes = (totalSeconds % 3600) / 60
+    val seconds = totalSeconds % 60
+    return when {
+        hours > 0 -> "$hours 小时 $minutes 分"
+        minutes > 0 -> "$minutes 分 $seconds 秒"
+        else -> "$seconds 秒"
+    }
+}
+
 /** 数量文案：`12 首` / `1.2 万首`。 */
 fun formatCount(count: Int?): String {
     val value = count ?: return ""

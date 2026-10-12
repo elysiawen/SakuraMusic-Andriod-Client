@@ -17,7 +17,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
-import androidx.compose.material.icons.rounded.DriveFileRenameOutline
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
@@ -50,8 +50,8 @@ import com.sakura.music.ui.components.AccountAvatar
 import com.sakura.music.ui.components.ActionsSheet
 import com.sakura.music.ui.components.ConfirmDialog
 import com.sakura.music.ui.components.ContentTopPadding
-import com.sakura.music.ui.components.CreatePlaylistDialog
 import com.sakura.music.ui.components.ListBottomPadding
+import com.sakura.music.ui.components.PlaylistDialog
 import com.sakura.music.ui.components.SakuraCard
 import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.SheetAction
@@ -84,7 +84,7 @@ fun AccountScreen(navigator: SakuraNavigator) {
     val scope = rememberCoroutineScope()
 
     var creating by remember { mutableStateOf(false) }
-    var renaming by remember { mutableStateOf<Playlist?>(null) }
+    var editing by remember { mutableStateOf<Playlist?>(null) }
     var deleting by remember { mutableStateOf<Playlist?>(null) }
     var clearingHistory by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<Playlist?>(null) }
@@ -214,24 +214,27 @@ fun AccountScreen(navigator: SakuraNavigator) {
     }
 
     if (creating) {
-        CreatePlaylistDialog(
+        PlaylistDialog(
             onDismiss = { creating = false },
-            onCreate = { name ->
+            onSubmit = { name, description ->
                 creating = false
-                viewModel.createPlaylist(name)
+                viewModel.createPlaylist(name, description)
             },
         )
     }
 
-    renaming?.let { playlist ->
-        CreatePlaylistDialog(
-            title = "重命名歌单",
+    // 编辑信息（名称 + 描述）：与新建歌单共用同一个弹窗，描述预填列表里那一份，
+    // 提交时两个字段一起发——只改名称的话，提交上去的还是原描述，等于没动。
+    editing?.let { playlist ->
+        PlaylistDialog(
+            title = "编辑信息",
             confirmLabel = "保存",
             initialName = playlist.name,
-            onDismiss = { renaming = null },
-            onCreate = { name ->
-                renaming = null
-                viewModel.renamePlaylist(playlist, name)
+            initialDescription = playlist.description,
+            onDismiss = { editing = null },
+            onSubmit = { name, description ->
+                editing = null
+                viewModel.updatePlaylistInfo(playlist, name, description)
             },
         )
     }
@@ -270,9 +273,9 @@ fun AccountScreen(navigator: SakuraNavigator) {
             onDismiss = { actionsFor = null },
             actions = listOf(
                 SheetAction(
-                    label = "重命名",
-                    icon = Icons.Rounded.DriveFileRenameOutline,
-                    onClick = { renaming = playlist },
+                    label = "编辑信息",
+                    icon = Icons.Rounded.Edit,
+                    onClick = { editing = playlist },
                 ),
                 SheetAction(
                     label = "删除歌单",

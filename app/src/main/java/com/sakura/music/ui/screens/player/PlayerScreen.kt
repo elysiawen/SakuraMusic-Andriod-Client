@@ -89,11 +89,17 @@ import androidx.compose.ui.input.pointer.util.VelocityTracker
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.LinkAnnotation
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -102,8 +108,10 @@ import coil.compose.AsyncImage
 import com.sakura.music.core.player.LrcParser
 import com.sakura.music.core.player.LyricLine
 import com.sakura.music.core.player.PlaybackRoute
+import com.sakura.music.data.model.ArtistRef
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
+import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.ui.appContainer
@@ -114,6 +122,7 @@ import com.sakura.music.ui.components.PlaybackErrorCard
 import com.sakura.music.ui.components.QueueSheet
 import com.sakura.music.ui.components.SnackbarMessages
 import com.sakura.music.ui.components.TrackActionsSheet
+import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.util.formatDuration
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -144,9 +153,12 @@ private val LYRIC_V_PADDING = 10.dp
  */
 /**
  * @param onCollapse 收起播放器浮层（箭头、下拉手势、失败页的「返回」都走它）。
+ * @param navigator 播放页是**盖在导航之上的浮层**，不在导航栈里，所以点歌手 / 专辑名要跳转
+ *   时只能把入口从外面递进来。它只管跳，浮层什么时候藏、什么时候回来由宿主
+ *   （`PlayerHost`）按「出发页」判断。
  */
 @Composable
-fun PlayerScreen(onCollapse: () -> Unit) {
+fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
     val container = appContainer()
     val state by container.playbackCenter.state.collectAsStateWithLifecycle()
     // 角标直接订阅路由流：上报发生在播放线程，走播放状态那条路容易漏掉更新。
@@ -250,9 +262,14 @@ fun PlayerScreen(onCollapse: () -> Unit) {
         state.lyric.indexOfLast { it.timeMs in 1..shownPosition }
     }
     val isFavorite = favorites.contains(track.key)
-    val subtitle = listOf(track.artistText.ifBlank { "未知歌手" }, track.album.name)
-        .filter { it.isNotBlank() }
-        .joinToString(" · ")
+    // 歌手与专辑名各自可点。这里**不**收起浮层：跳转之后宿主会按「出发页」把它藏起来，
+    // 用户从详情页返回时再自动放回来——返回键那条链才是「详情页 → 播放页 → 出发页」。
+    val subtitle = subtitleWithLinks(
+        track = track,
+        linkColor = MaterialTheme.colorScheme.primary,
+        onOpenArtist = { platform, id, name -> navigator.openArtist(platform, id, name) },
+        onOpenAlbum = { platform, id, name -> navigator.openAlbum(platform, id, name) },
+    )
 
     Box(
         modifier = Modifier
@@ -654,8 +671,64 @@ private fun CoverArt(
 
 /* ------------------------------ 曲目信息 ------------------------------ */
 
+/**
+ * 副标题：`歌手 · 专辑`，两边的名字各自可点。
+ *
+ * 用带 link 的 [AnnotatedString] 而不是把它们拆成一行 Text——这一行要保持原来的居中、
+ * 单行、超长省略号的行为，拆成多个 Text 就得自己重做换行与省略。link 的样式会**盖掉**
+ * AnnotatedString 上已有的样式（`TextLinkStyles` 的约定），所以链接色直接写在这里就行。
+ *
+ * 缺 ID 或平台未知的那一段（合并前的老数据、上游没给）就按普通文字画，点了没反应，
+ * 总比拼出一个错的详情页地址强。
+ */
+private fun subtitleWithLinks(
+    track: UnifiedTrack,
+    linkColor: Color,
+    onOpenArtist: (Platform, String, String) -> Unit,
+    onOpenAlbum: (Platform, String, String) -> Unit,
+): AnnotatedString {
+    val linkStyles = TextLinkStyles(style = SpanStyle(color = linkColor))
+
+    return buildAnnotatedString {
+        val artists = track.artists.ifEmpty { listOf(ArtistRef(name = "未知歌手")) }
+        artists.forEachIndexed { index, artist ->
+            if (index > 0) append(" / ")
+
+            val platform = artist.platform
+            val id = artist.id
+            if (platform != null && platform.isKnown && id != null) {
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = "artist:${platform.id}:$id",
+                        styles = linkStyles,
+                    ) { onOpenArtist(platform, id, artist.name) }
+                ) { append(artist.name) }
+            } else {
+                append(artist.name)
+            }
+        }
+
+        val album = track.album
+        val albumPlatform = album.platform
+        val albumId = album.id
+        if (album.name.isNotBlank()) {
+            append(" · ")
+            if (albumPlatform != null && albumPlatform.isKnown && albumId != null) {
+                withLink(
+                    LinkAnnotation.Clickable(
+                        tag = "album:${albumPlatform.id}:$albumId",
+                        styles = linkStyles,
+                    ) { onOpenAlbum(albumPlatform, albumId, album.name) }
+                ) { append(album.name) }
+            } else {
+                append(album.name)
+            }
+        }
+    }
+}
+
 @Composable
-private fun TrackInfo(title: String, subtitle: String, trial: Boolean) {
+private fun TrackInfo(title: String, subtitle: AnnotatedString, trial: Boolean) {
     Text(
         text = title.ifBlank { "未知歌曲" },
         style = MaterialTheme.typography.titleLarge,

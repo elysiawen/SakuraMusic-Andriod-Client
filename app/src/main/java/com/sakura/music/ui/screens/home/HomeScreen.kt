@@ -1,5 +1,11 @@
 package com.sakura.music.ui.screens.home
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -13,6 +19,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CloudOff
@@ -27,8 +34,10 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -69,29 +78,53 @@ fun HomeScreen(navigator: SakuraNavigator) {
 
     val current = state
 
+    // 「发现」那栏只在列表**回到最顶上**时才露出来：往下翻就把它收掉，高度让给内容。
+    // 用 derivedStateOf 而不是直接读 listState：滚动每挪一个像素都会变的是偏移量，
+    // 而这里只关心「在不在顶上」这一个布尔值，不该为此把顶栏重组一遍。
+    val listState = rememberLazyListState()
+    val atTop by remember {
+        derivedStateOf {
+            // 偏移量取 <= 0：在最顶上继续下拉时的回弹会给出负值，那也是「在顶上」。
+            listState.firstVisibleItemIndex == 0 && listState.firstVisibleItemScrollOffset <= 0
+        }
+    }
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         snackbarHost = { SnackbarHost(snackbar) },
-        topBar = {
-            SakuraTopBar(
-                title = "发现",
-                subtitle = greeting(auth.user?.nickname),
-                actions = {
-                    IconButton(
-                        onClick = { viewModel.load(force = true) },
-                        enabled = !current.refreshing,
-                    ) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "换一批")
-                    }
-                },
-            )
-        },
     ) { padding ->
         Column(
             modifier = Modifier
                 .fillMaxSize()
+                // 刻意不给 Scaffold 传 topBar：「发现」栏要跟着滚动收起，而它的高度变了之后
+                // 内容区会不会跟着重排，取决于 Scaffold 内部 subcompose 的实现——不如把这一栏
+                // 放进内容里，由 Column 自己排，收起来省下的高度自然归下面的列表。
+                // 没有 topBar 时，Scaffold 会把状态栏间距算进这份 padding；它是 Column 的
+                // 固定内边距，不会跟着顶栏一起收掉，所以搜索栏不会顶到状态栏底下。
                 .padding(top = padding.calculateTopPadding()),
         ) {
+            AnimatedVisibility(
+                visible = atTop,
+                // 收起比展开快一点：往下翻是「让开」，不该让人觉得有东西在挡路。
+                enter = expandVertically(expandFrom = Alignment.Top) + fadeIn(tween(240)),
+                exit = shrinkVertically(shrinkTowards = Alignment.Top) + fadeOut(tween(140)),
+            ) {
+                SakuraTopBar(
+                    title = "发现",
+                    subtitle = greeting(auth.user?.nickname),
+                    // 状态栏间距上面已经让开了，别让第二遍。
+                    statusBarPadding = false,
+                    actions = {
+                        IconButton(
+                            onClick = { viewModel.load(force = true) },
+                            enabled = !current.refreshing,
+                        ) {
+                            Icon(Icons.Rounded.Refresh, contentDescription = "换一批")
+                        }
+                    },
+                )
+            }
+
             SearchEntryBar(
                 onClick = navigator::openSearch,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = ContentTopPadding),
@@ -118,6 +151,8 @@ fun HomeScreen(navigator: SakuraNavigator) {
                     )
 
                     else -> LazyColumn(
+                        // 必须用外面那个 listState：「发现」栏的显隐就是按它的位置算的。
+                        state = listState,
                         modifier = Modifier.fillMaxSize(),
                         contentPadding = PaddingValues(
                             top = ContentTopPadding,

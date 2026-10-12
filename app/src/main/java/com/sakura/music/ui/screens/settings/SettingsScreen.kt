@@ -52,6 +52,7 @@ import com.sakura.music.data.cache.CacheManager
 import com.sakura.music.data.cache.CacheUsage
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
+import com.sakura.music.data.prefs.DetailHeaderStyle
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.prefs.RoutePreference
 import com.sakura.music.data.prefs.SettingsStore
@@ -76,7 +77,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
 private enum class SheetKind {
-    Quality, PlayMode, Platform, LyricTtl, MetaTtl, RouteNetease, RouteQq,
+    Quality, PlayMode, Platform, LyricTtl, MetaTtl, RouteNetease, RouteQq, HeaderStyle,
 }
 
 /**
@@ -93,6 +94,8 @@ fun SettingsScreen(navigator: SakuraNavigator) {
     val accent by container.settings.accent.collectAsStateWithLifecycle(initialValue = AccentTheme.Sakura)
     val themeMode by container.settings.themeMode
         .collectAsStateWithLifecycle(initialValue = ThemeMode.System)
+    val headerStyle by container.settings.detailHeaderStyle
+        .collectAsStateWithLifecycle(initialValue = DetailHeaderStyle.Default)
     val quality by container.settings.quality.collectAsStateWithLifecycle(initialValue = Quality.Default)
     val playMode by container.settings.playMode.collectAsStateWithLifecycle(initialValue = PlayMode.All)
     val mixWithOthers by container.settings.mixWithOthers.collectAsStateWithLifecycle(initialValue = false)
@@ -152,6 +155,15 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                 ThemeModePicker(
                     selected = themeMode,
                     onSelect = { scope.launch { container.settings.setThemeMode(it) } },
+                )
+                // 三个方块自己不带内边距，不留这一下的话分割线会直接贴在它们下沿上。
+                Spacer(Modifier.height(14.dp))
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "详情页样式",
+                    subtitle = headerStyle.hint,
+                    onClick = { openSheet = SheetKind.HeaderStyle },
+                    trailing = { ValueText(headerStyle.label) },
                 )
             }
 
@@ -390,6 +402,16 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                 if (option == null) "按歌曲自带的来源优先级" else "这首歌在${option.label}有资源时优先用它"
             },
             onSelect = { scope.launch { container.settings.setPreferredPlatform(it) } },
+            onDismiss = { openSheet = null },
+        )
+
+        SheetKind.HeaderStyle -> ChoiceSheet(
+            title = "详情页样式",
+            options = DetailHeaderStyle.entries,
+            selected = headerStyle,
+            optionLabel = { it.label },
+            optionSubtitle = { it.hint },
+            onSelect = { scope.launch { container.settings.setDetailHeaderStyle(it) } },
             onDismiss = { openSheet = null },
         )
 

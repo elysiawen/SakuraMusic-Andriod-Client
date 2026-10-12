@@ -53,6 +53,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.media3.session.MediaController
 import androidx.navigation.NavBackStackEntry
+import androidx.navigation.NavHostController
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -91,6 +92,14 @@ import com.sakura.music.ui.theme.SakuraTheme
  * - 往下拖 / 收起时，底下的页面（发现、账号、详情页…）还组合着，拖下来能看到它们；
  * - 系统返回键先收起播放器，而不是把底下的页面弹掉；
  * - 队列、迷你播放条、播放器三者看到的是同一个播放会话。
+ *
+ * 从播放页跳去歌手 / 专辑页时它只是**先藏起来**，不是关掉：用户从详情页返回，
+ * 回到出发那一页时它自己回来——返回键那条链才是「详情页 → 播放页 → 出发页」。
+ *
+ * 它一直是个浮层（而不是导航栈里的一页），是因为「往下拖能看到底下的页面」这个交互
+ * 需要底下的页面还组合着。代价是：它盖在导航内容之上，所以详情页自己的推入 / 返回动画
+ * 大半被它挡住——转场只能由它来演。这也正是它在跳转时不该用竖向滑动的原因（见下面的
+ * [AnimatedVisibility]）：它扮的是转场里「被推走 / 重新露出来」的那一页，得跟着导航那一套走。
  */
 @Composable
 private fun PlayerHost(
@@ -99,31 +108,106 @@ private fun PlayerHost(
     onClose: () -> Unit,
     controller: MediaController?,
 ) {
-    Box(modifier = Modifier.fillMaxSize()) {
-        SakuraNavigation(controller = controller, onOpenPlayer = onOpen)
+    /*
+     * 导航控制器提到这一层，而不是留在 SakuraNavigation 里。
+     *
+     * 因为播放器浮层是**盖在导航之上的兄弟节点**，够不到 SakuraNavigation 内部的东西；
+     * 而播放页里点歌手 / 专辑名要跳转，两边就得共用同一个 navigator。
+     * 提上来之后两者的生命周期不变：都跟着登录态一起被创建和销毁。
+     */
+    val navController = rememberNavController()
+    val navigator = remember(navController) { SakuraNavigator(navController) }
 
-        // 必须用「开着才组合」而不是常驻 + enabled 开关：
+    /*
+     * 播放页是从哪一页打开的。
+     *
+     * 用它决定浮层此刻该不该露出来：跳去详情页之后（当前 entry 换了）先藏起来，
+     * 不然会盖住详情页；回到出发那一页时（当前 entry 又是它）自动回来。
+     *
+     * 比的是 entry **本体**而不是它所在的路由：详情页之间互相跳（歌手 → 歌手、
+     * 歌手 → 专辑）时路由可能一模一样，拿路由比会把浮层留在上面盖住新页面。
+     *
+     * 它刻意不是 saveable —— entry 对象活不过进程重建，重建后按「没有出处」处理，
+     * 照常显示播放页（和以前的行为一致）。
+     */
+    var openedFrom by remember { mutableStateOf<NavBackStackEntry?>(null) }
+    val currentEntry by navController.currentBackStackEntryAsState()
+    /** 被详情页压住了：出发页还在栈里，只是当前页已经不是它。 */
+    val coveredByDetail = openedFrom != null && openedFrom != currentEntry
+    val playerVisible = open && !coveredByDetail
+
+    /*
+     * 这一次显露是不是「从详情页回来的」。
+     *
+     * 两种入场必须分开：
+     * - 用户自己打开播放页（迷你条）：从下往上**升起**，它本来就是从迷你条那儿冒出来的；
+     * - 从详情页回来：它不是被打开，是**被详情页压住之后又露出来**——该用导航返回时
+     *   「上一页重新出现」的那套动画。
+     *
+     * 后者要是也来一遍「升起」，用户看到的就是播放页"又开了一次"，可它其实一直在那儿；
+     * 何况底下的详情页正在退场，两套方向相反的动画叠在一起，正是看着别扭的根源。
+     *
+     * 只在被压住的时候置位；迷你条那条入口负责清掉。
+     */
+    var revealFromDetail by remember { mutableStateOf(false) }
+    LaunchedEffect(open, coveredByDetail) {
+        if (open && coveredByDetail) revealFromDetail = true
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        SakuraNavigation(
+            navController = navController,
+            navigator = navigator,
+            controller = controller,
+            // 打开播放页时记下出发页，之后才知道该回到哪。
+            onOpenPlayer = {
+                openedFrom = navController.currentBackStackEntry
+                // 用户自己打开的，用「升起」那套。
+                revealFromDetail = false
+                onOpen()
+            },
+        )
+
+        // 必须用「露着才组合」而不是常驻 + enabled 开关：
         // OnBackPressedDispatcher 是按注册顺序取最后一个生效的，而 NavHost 每次页面
         // 切换都会重新注册自己的「弹栈」回调——常驻的那个是启动时就注册的，
         // 永远排在它后面，于是系统返回会去弹底下的页面（首页除外，因为首页无可弹）。
-        // 开着的时候才组合，注册时机就在 NavHost 之后，优先级才对。
-        if (open) {
+        // 露着的时候才组合，注册时机就在 NavHost 之后，优先级才对。
+        //
+        // 条件用 playerVisible 而不是 open：跳去详情页时 open 还是 true（为了回来时能自动
+        // 展开），这时候返回键必须去弹详情页，不能被播放页抢走。
+        if (playerVisible) {
             androidx.activity.compose.BackHandler { onClose() }
         }
 
 
+        // 跳去歌手 / 专辑页、再从那儿回来时，播放页在转场里扮的是**被推走 / 重新露出来的
+        // 那一页**，所以直接用导航那一套参数（同一组常量，两边不会再各改各的）：
+        // 被推走 = 淡出（导航里任何页面被下一个盖住都是这么退场的），重新露出来 = 从左侧滑入
+        // + 淡入（和导航返回时「上一页」的入场逐帧一致）。只有用户自己开 / 关才用竖向滑动。
         AnimatedVisibility(
-            visible = open,
-            enter = slideInVertically(
-                initialOffsetY = { it },
-                animationSpec = tween(280, easing = FastOutSlowInEasing),
-            ) + fadeIn(tween(220)),
-            exit = slideOutVertically(
-                targetOffsetY = { it },
-                animationSpec = tween(280, easing = FastOutSlowInEasing),
-            ) + fadeOut(tween(220)),
+            visible = playerVisible,
+            enter = if (revealFromDetail) {
+                slideInHorizontally(
+                    initialOffsetX = { -it / PAGE_SLIDE_FRACTION },
+                    animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(PAGE_FADE_IN_MS))
+            } else {
+                slideInVertically(
+                    initialOffsetY = { it },
+                    animationSpec = tween(280, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(220))
+            },
+            exit = if (coveredByDetail) {
+                fadeOut(tween(PAGE_FADE_OUT_MS))
+            } else {
+                slideOutVertically(
+                    targetOffsetY = { it },
+                    animationSpec = tween(280, easing = FastOutSlowInEasing),
+                ) + fadeOut(tween(220))
+            },
         ) {
-            PlayerScreen(onCollapse = onClose)
+            PlayerScreen(onCollapse = onClose, navigator = navigator)
         }
     }
 }
@@ -258,6 +342,17 @@ private val bottomDestinations = listOf(
  */
 private const val TAB_SLIDE_FRACTION = 8
 
+/**
+ * 非页签切换（推入 / 返回详情页）时的页面转场参数。
+ *
+ * 播放器浮层也用这一组：它跳去歌手 / 专辑页、再从那儿回来时，扮的就是转场里「被推走 /
+ * 重新露出来」的那一页。两边共用同一组常量，才不会各改各的、越走越不一个拍子。
+ */
+private const val PAGE_SLIDE_FRACTION = 5
+private const val PAGE_SLIDE_MS = 260
+private const val PAGE_FADE_IN_MS = 200
+private const val PAGE_FADE_OUT_MS = 160
+
 /** -1 = 往左切页，1 = 往右，0 = 不是一级页面之间的切换。 */
 private fun AnimatedContentTransitionScope<NavBackStackEntry>.tabDirection(): Int {
     val from = Routes.mainDestinations.indexOf(initialState.destination.route)
@@ -275,15 +370,15 @@ private fun AnimatedContentTransitionScope<NavBackStackEntry>.tabDirection(): In
  */
 @Composable
 private fun SakuraNavigation(
+    navController: NavHostController,
+    navigator: SakuraNavigator,
     controller: MediaController?,
     onOpenPlayer: () -> Unit,
 ) {
-    val navController = rememberNavController()
     val backStackEntry by navController.currentBackStackEntryAsState()
     // 首帧 back stack 还没建好，按起始页（发现）算，免得底部栏闪一下才出现。
     val currentRoute = backStackEntry?.destination?.route ?: Routes.HOME
     val onMainDestination = currentRoute in Routes.mainDestinations
-    val navigator = remember(navController) { SakuraNavigator(navController) }
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -331,9 +426,9 @@ private fun SakuraNavigation(
                     ) + fadeIn(tween(240))
                 } else {
                     slideInHorizontally(
-                        initialOffsetX = { it / 5 },
-                        animationSpec = tween(260, easing = FastOutSlowInEasing),
-                    ) + fadeIn(tween(200))
+                        initialOffsetX = { it / PAGE_SLIDE_FRACTION },
+                        animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+                    ) + fadeIn(tween(PAGE_FADE_IN_MS))
                 }
             },
             exitTransition = {
@@ -343,19 +438,19 @@ private fun SakuraNavigation(
                         animationSpec = tween(240, easing = FastOutSlowInEasing),
                     ) + fadeOut(tween(180))
                 } else {
-                    fadeOut(tween(160))
+                    fadeOut(tween(PAGE_FADE_OUT_MS))
                 }
             },
             popEnterTransition = {
                 slideInHorizontally(
-                    initialOffsetX = { -it / 5 },
-                    animationSpec = tween(260, easing = FastOutSlowInEasing),
-                ) + fadeIn(tween(200))
+                    initialOffsetX = { -it / PAGE_SLIDE_FRACTION },
+                    animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+                ) + fadeIn(tween(PAGE_FADE_IN_MS))
             },
             popExitTransition = {
                 slideOutHorizontally(
-                    targetOffsetX = { it / 5 },
-                    animationSpec = tween(260, easing = FastOutSlowInEasing),
+                    targetOffsetX = { it / PAGE_SLIDE_FRACTION },
+                    animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
                 ) + fadeOut(tween(180))
             },
         ) {

@@ -1,44 +1,34 @@
 package com.sakura.music.ui.screens.library
 
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.FavoriteBorder
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.prefs.DetailHeaderStyle
 import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.data.repo.LibraryRepository
 import com.sakura.music.ui.appContainer
+import com.sakura.music.ui.components.DetailAction
+import com.sakura.music.ui.components.DetailHeaderData
+import com.sakura.music.ui.components.DetailPage
 import com.sakura.music.ui.components.ListBottomPadding
-import com.sakura.music.ui.components.LoadingState
-import com.sakura.music.ui.components.MediaHeader
-import com.sakura.music.ui.components.PlayAllButton
-import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.StateMessage
 import com.sakura.music.ui.components.TrackDivider
 import com.sakura.music.ui.components.TrackRowContainer
+import com.sakura.music.ui.components.trackListStats
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -48,10 +38,9 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 /**
- * 「我喜欢的音乐」——收藏。
+ * 收藏。
  *
- * 收不进「自建歌单」那套：收藏在网关侧是 `/api/favorites` 一组独立的接口，
- * 没有歌单 id，也就不能改名、删除、排序。所以它是歌单页签里一个固定入口，
+ * 「我喜欢的音乐」在网关侧不是歌单（没有 id、不能改名、不能排序），所以它单独占一页，
  * 点进来是这一页，而不是复用 [com.sakura.music.ui.screens.playlist.PlaylistScreen]。
  */
 @Composable
@@ -61,89 +50,69 @@ fun FavoritesScreen(navigator: SakuraNavigator) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
+    val headerStyle by container.settings.detailHeaderStyle
+        .collectAsStateWithLifecycle(initialValue = DetailHeaderStyle.Default)
 
-    Scaffold(
-        containerColor = MaterialTheme.colorScheme.background,
-        snackbarHost = { SnackbarHost(snackbar) },
-        topBar = {
-            SakuraTopBar(
-                title = "我喜欢的音乐",
-                subtitle = "收藏",
-                onBack = navigator::back,
-                actions = {
-                    IconButton(onClick = viewModel::load) {
-                        Icon(Icons.Rounded.Refresh, contentDescription = "刷新")
-                    }
-                },
+    // 头部版式与加载占位都是用户可选的（设置 → 外观）。
+    val immersive = headerStyle == DetailHeaderStyle.Immersive
+
+    // 页面骨架（顶栏 / 悬浮工具栏 / 骨架屏 / 两栏接线）在 DetailPage 里，五个详情页共用。
+    DetailPage(
+        immersive = immersive,
+        loading = state.loading,
+        // 收藏这一页的「有没有东西可看」就是「有没有收藏」，所以空列表等于还没就绪——
+        // 于是它会走下面的 absent（整页空态），而不是画一个空头部。
+        ready = state.tracks.isNotEmpty(),
+        error = state.error,
+        errorTitle = "收藏打不开",
+        onRetry = viewModel::load,
+        onBack = navigator::back,
+        initialTitle = "我喜欢的音乐",
+        subtitle = "收藏",
+        snackbar = snackbar,
+        actions = listOf(
+            DetailAction(icon = Icons.Rounded.Refresh, label = "刷新", onClick = viewModel::load),
+        ),
+        header = DetailHeaderData(
+            title = "我喜欢的音乐",
+            // 封面取自最近收藏的那首（倒序第一条），收藏本身没有独立封面。
+            coverUrl = state.tracks.firstOrNull()?.album?.cover,
+            label = "收藏",
+            stats = trackListStats(state.tracks),
+            description = "在任意列表里点歌曲右侧的爱心，就会收藏到这里。",
+            onPlayAll = { container.playbackCenter.play(state.tracks, 0) },
+        ),
+        absent = {
+            StateMessage(
+                icon = Icons.Rounded.FavoriteBorder,
+                title = "还没有收藏",
+                message = "在任意列表里点歌曲右侧的爱心即可收藏，收藏只存在你的账号下。",
             )
         },
-    ) { padding ->
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(top = padding.calculateTopPadding()),
-        ) {
-            when {
-                state.loading && state.tracks.isEmpty() -> LoadingState("正在加载…")
-
-                state.error != null && state.tracks.isEmpty() -> StateMessage(
-                    icon = Icons.Rounded.CloudOff,
-                    title = "收藏打不开",
-                    message = state.error,
-                    actionLabel = "重试",
-                    onAction = viewModel::load,
+        // 列表内容：头部不在里面——单栏时它是第一项，两栏时它是左栏。
+        list = {
+            itemsIndexed(
+                items = state.tracks,
+                key = { index, track -> "favorite-$index:${track.key}" },
+            ) { index, track ->
+                TrackRowContainer(
+                    track = track,
+                    index = index + 1,
+                    onPlay = { container.playbackCenter.play(state.tracks, index) },
+                    onMessage = { scope.launch { snackbar.showSnackbar(it) } },
+                    // 行内那颗爱心留着（点一下就能取消收藏）；只把菜单里重复的
+                    // 「取消收藏」拿掉。
+                    showFavoriteAction = false,
+                    onFavoriteToggled = { favorite ->
+                        if (!favorite) viewModel.remove(track.key)
+                    },
                 )
-
-                state.tracks.isEmpty() -> StateMessage(
-                    icon = Icons.Rounded.FavoriteBorder,
-                    title = "还没有收藏",
-                    message = "在任意列表里点歌曲右侧的爱心即可收藏，收藏只存在你的账号下。",
-                )
-
-                else -> LazyColumn(
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = ListBottomPadding),
-                ) {
-                    // 头部与自建歌单详情页同一套：大封面 + 数量 + 播放全部。
-                    item(key = "header") {
-                        MediaHeader(
-                            title = "我喜欢的音乐",
-                            subtitle = "${state.tracks.size} 首",
-                            description = "在任意列表里点歌曲右侧的爱心，就会收藏到这里。",
-                            coverUrl = state.tracks.firstOrNull()?.album?.cover,
-                            actions = {
-                                PlayAllButton(
-                                    onClick = { container.playbackCenter.play(state.tracks, 0) },
-                                )
-                            },
-                        )
-                        Spacer(Modifier.height(14.dp))
-                    }
-
-                    itemsIndexed(
-                        items = state.tracks,
-                        key = { index, track -> "favorite-$index:${track.key}" },
-                    ) { index, track ->
-                        TrackRowContainer(
-                            track = track,
-                            index = index + 1,
-                            onPlay = { container.playbackCenter.play(state.tracks, index) },
-                            onMessage = { scope.launch { snackbar.showSnackbar(it) } },
-                            // 行内那颗爱心留着（点一下就能取消收藏）；只把菜单里重复的
-                            // 「取消收藏」拿掉。
-                            showFavoriteAction = false,
-                            onFavoriteToggled = { favorite ->
-                                if (!favorite) viewModel.remove(track.key)
-                            },
-                        )
-                        if (index != state.tracks.lastIndex) TrackDivider()
-                    }
-
-                    item(key = "bottom-gap") { Spacer(Modifier.height(ListBottomPadding)) }
-                }
+                if (index != state.tracks.lastIndex) TrackDivider()
             }
-        }
-    }
+
+            item(key = "bottom-gap") { Spacer(Modifier.height(ListBottomPadding)) }
+        },
+    )
 }
 
 /** 收藏列表：一份 tracks 加一个「取消了就撤掉这一行」的动作就够。 */

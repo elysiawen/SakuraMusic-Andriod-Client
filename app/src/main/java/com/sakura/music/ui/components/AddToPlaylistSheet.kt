@@ -177,12 +177,18 @@ fun AddToPlaylistSheet(
     }
 
     if (creating) {
-        CreatePlaylistDialog(
+        PlaylistDialog(
             onDismiss = { creating = false },
-            onCreate = { name ->
+            // 描述留空就整个不带：新建时没写描述，没必要提交一个空串。
+            onSubmit = { name, description ->
                 busy = true
                 scope.launch {
-                    runCatching { container.libraryRepository.createPlaylist(name, null) }
+                    runCatching {
+                        container.libraryRepository.createPlaylist(
+                            name,
+                            description.takeIf { it.isNotBlank() },
+                        )
+                    }
                         .onSuccess { created ->
                             creating = false
                             onMessage("已创建「${created.name}」")
@@ -196,38 +202,84 @@ fun AddToPlaylistSheet(
     }
 }
 
+/** 名称上限，与网关 `createPlaylist` 的校验（1–60 位）一致。 */
+private const val PLAYLIST_NAME_MAX = 60
+
 /**
- * 新建 / 重命名歌单：名称 1–60 字，与网关校验保持一致。
+ * 描述上限，与网关的 `PLAYLIST_DESCRIPTION_MAX` 一致。
  *
- * 两者只差标题、按钮文案与初始值，所以合成一个——重命名也走这里。
+ * 两边必须一致：服务端是对超长内容做 `slice`（**悄悄截掉**），不是报错，所以界面上能填进去
+ * 而库里存不下的那一段会凭空消失——用户以为自己写上了。
+ */
+private const val PLAYLIST_DESCRIPTION_MAX = 800
+
+/**
+ * 歌单弹窗：**新建与编辑共用**——两个模式要填的字段完全一样（名称 + 描述），
+ * 分成两个弹窗只会把同一份表单抄两遍。
+ *
+ * - 只给 [initialName] / [initialDescription] 的默认值：新建。
+ * - 传当前歌单的值：编辑（歌单页的「编辑信息」走这里），[onSubmit] 一次把两个字段提交上去。
+ *
+ * 名称发请求前会 trim；描述按原样 trim 后提交（提交空串 = 清掉描述，省略字段 = 保持原值，
+ * 网关侧是 `coalesce`）。
  */
 @Composable
-fun CreatePlaylistDialog(
+fun PlaylistDialog(
     onDismiss: () -> Unit,
-    onCreate: (String) -> Unit,
+    onSubmit: (name: String, description: String) -> Unit,
     title: String = "新建歌单",
     confirmLabel: String = "创建",
     initialName: String = "",
+    initialDescription: String = "",
 ) {
     var name by remember { mutableStateOf(initialName) }
+    var description by remember { mutableStateOf(initialDescription) }
     val trimmed = name.trim()
 
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title) },
         text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { if (it.length <= 60) name = it },
-                label = { Text("歌单名称") },
-                singleLine = true,
-                shape = MaterialTheme.shapes.medium,
-                modifier = Modifier.fillMaxWidth(),
-            )
+            Column {
+                OutlinedTextField(
+                    value = name,
+                    onValueChange = { if (it.length <= PLAYLIST_NAME_MAX) name = it },
+                    label = { Text("歌单名称") },
+                    singleLine = true,
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+
+                Spacer(Modifier.height(12.dp))
+
+                OutlinedTextField(
+                    value = description,
+                    onValueChange = {
+                        if (it.length <= PLAYLIST_DESCRIPTION_MAX) description = it
+                    },
+                    label = { Text("描述（可选）") },
+                    placeholder = { Text("写点什么，之后会在歌单页看到") },
+                    // 多行：描述常要写一两句话，单行框里只能左右挪着看。
+                    // 这里不拦回车（那是换行），提交走按钮。
+                    minLines = 3,
+                    maxLines = 5,
+                    shape = MaterialTheme.shapes.medium,
+                    // 计数靠右，和输入框右下角对齐。
+                    supportingText = {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            Text("${description.length} / $PLAYLIST_DESCRIPTION_MAX")
+                        }
+                    },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         },
         confirmButton = {
             TextButton(
-                onClick = { onCreate(trimmed) },
+                onClick = { onSubmit(trimmed, description.trim()) },
                 enabled = trimmed.isNotEmpty(),
             ) { Text(confirmLabel) }
         },

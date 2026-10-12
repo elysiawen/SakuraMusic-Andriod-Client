@@ -1,6 +1,5 @@
 package com.sakura.music.ui.components
 
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -23,39 +22,68 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 
+/** 经典版式里封面那一栏的尺寸。 */
+private val CompactCoverSize = 112.dp
+
+/** 圆形头像稍微小一点，圆形本来就比方形显得大。 */
+private val CompactAvatarSize = 104.dp
+
 /**
- * 详情页（歌单 / 榜单 / 歌手 / 专辑）顶部统一的头部。
+ * 详情页头部的**紧凑版式**（设置 → 外观 → 详情页样式 选「经典」时用它）。
  *
- * 左边一张封面（歌手传圆形），右边标题、副标题、平台徽标与简介，下面一排动作。
+ * 左边一张封面（歌手传圆形），右边分类行、标题、副标题、统计和徽标，下面一排动作。
+ * 与 [MediaHero] 是同一个头的两种版式：那个把封面铺满顶部，这个把封面缩进页内。
+ * 两者的参数一一对应，所以调用方只换组件名，不用重新组织数据。
  */
 @Composable
 fun MediaHeader(
     title: String,
     modifier: Modifier = Modifier,
+    /** 标题上方的分类行，例如「专辑 · QQ 音乐」。 */
+    label: String? = null,
     subtitle: String? = null,
+    /** 数量与总时长一类的统计行，用 [trackListStats] 生成。 */
+    stats: String? = null,
     description: String? = null,
     coverUrl: String? = null,
     circularCover: Boolean = false,
     badges: (@Composable RowScope.() -> Unit)? = null,
-    actions: (@Composable RowScope.() -> Unit)? = null,
+    onPlayAll: (() -> Unit)? = null,
+    playAllEnabled: Boolean = true,
 ) {
-    Column(modifier = modifier.fillMaxWidth().padding(horizontal = 20.dp)) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .padding(horizontal = 20.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (circularCover) {
-                ArtistAvatar(avatar = coverUrl, size = 108.dp)
+                ArtistAvatar(avatar = coverUrl, size = CompactAvatarSize)
             } else {
-                SquareCover(url = coverUrl, modifier = Modifier.size(112.dp))
+                SquareCover(url = coverUrl, modifier = Modifier.size(CompactCoverSize))
             }
 
             Spacer(Modifier.width(16.dp))
 
             Column(modifier = Modifier.weight(1f)) {
+                if (!label.isNullOrBlank()) {
+                    Text(
+                        text = label,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Spacer(Modifier.height(4.dp))
+                }
+
                 Text(
                     text = title.ifBlank { "未知" },
                     style = MaterialTheme.typography.titleLarge,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
                 )
+
                 if (!subtitle.isNullOrBlank()) {
                     Spacer(Modifier.height(4.dp))
                     Text(
@@ -66,6 +94,18 @@ fun MediaHeader(
                         overflow = TextOverflow.Ellipsis,
                     )
                 }
+
+                if (!stats.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = stats,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+
                 if (badges != null) {
                     Spacer(Modifier.height(8.dp))
                     Row(
@@ -77,10 +117,12 @@ fun MediaHeader(
             }
         }
 
-        if (!description.isNullOrBlank() && description != subtitle) {
+        // 调用方常把同一句话同时塞给 subtitle / stats / description，重复的就不再画一遍。
+        val note = description?.takeIf { it.isNotBlank() }
+        if (note != null && note != subtitle && note != stats) {
             Spacer(Modifier.height(12.dp))
             Text(
-                text = description,
+                text = note,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 3,
@@ -88,58 +130,18 @@ fun MediaHeader(
             )
         }
 
-        if (actions != null) {
+        if (onPlayAll != null) {
             Spacer(Modifier.height(12.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                content = actions,
-            )
+            // 这套版式用文字按钮：封面本来就小，一颗实心大按钮压在旁边会把主次颠倒过来。
+            TextButton(onClick = onPlayAll, enabled = playAllEnabled) {
+                Icon(
+                    imageVector = Icons.Rounded.PlayArrow,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp),
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("播放全部")
+            }
         }
-    }
-}
-
-/** 头部动作里的「播放全部」。 */
-@Composable
-fun PlayAllButton(
-    onClick: () -> Unit,
-    label: String = "播放全部",
-    enabled: Boolean = true,
-) {
-    TextButton(onClick = onClick, enabled = enabled) {
-        Icon(
-            imageVector = Icons.Rounded.PlayArrow,
-            contentDescription = null,
-            modifier = Modifier.size(20.dp),
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(label)
-    }
-}
-
-/** 头部动作里的次要按钮（随机播放、关注之类）。 */
-@Composable
-fun HeaderAction(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    label: String,
-    onClick: () -> Unit,
-    modifier: Modifier = Modifier,
-) {
-    Row(
-        modifier = modifier.clickable(onClick = onClick),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Icon(
-            imageVector = icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(20.dp),
-        )
-        Spacer(Modifier.width(4.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
     }
 }

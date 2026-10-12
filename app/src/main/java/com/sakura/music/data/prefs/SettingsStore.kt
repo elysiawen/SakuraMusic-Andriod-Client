@@ -35,6 +35,8 @@ class SettingsStore(private val context: Context) {
         val MetaCacheDays = intPreferencesKey("meta_cache_days")
         val Accent = stringPreferencesKey("accent")
         val ThemeMode = stringPreferencesKey("theme_mode")
+        /** 详情页头部版式（沉浸式 / 经典）。 */
+        val DetailHeader = stringPreferencesKey("detail_header_style")
         val Quality = stringPreferencesKey("quality")
         val PlayMode = stringPreferencesKey("play_mode")
         /** 是否与其他应用同时出声（不抢占音频焦点）。 */
@@ -93,6 +95,9 @@ class SettingsStore(private val context: Context) {
     val themeMode: Flow<ThemeMode> = context.settingsDataStore.data
         .map { ThemeMode.fromId(it[Keys.ThemeMode]) }
 
+    val detailHeaderStyle: Flow<DetailHeaderStyle> = context.settingsDataStore.data
+        .map { DetailHeaderStyle.fromId(it[Keys.DetailHeader]) }
+
     val quality: Flow<Quality> = context.settingsDataStore.data
         .map { Quality.fromId(it[Keys.Quality]) }
 
@@ -145,6 +150,10 @@ class SettingsStore(private val context: Context) {
     suspend fun setAccent(value: AccentTheme) = edit { it[Keys.Accent] = value.name }
 
     suspend fun setThemeMode(value: ThemeMode) = edit { it[Keys.ThemeMode] = value.name }
+
+    suspend fun setDetailHeaderStyle(value: DetailHeaderStyle) = edit {
+        it[Keys.DetailHeader] = value.id
+    }
 
     suspend fun setQuality(value: Quality) = edit { it[Keys.Quality] = value.id }
 

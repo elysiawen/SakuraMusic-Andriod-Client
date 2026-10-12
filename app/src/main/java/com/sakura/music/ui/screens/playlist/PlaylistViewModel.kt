@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
-/** 自建歌单详情：可以改名、删除、移除单曲。 */
+/** 自建歌单详情：可以改信息（名称 + 描述）、删除、移除单曲。 */
 class PlaylistViewModel(
     private val library: LibraryRepository,
     private val playlistId: String,
@@ -50,13 +50,25 @@ class PlaylistViewModel(
         }
     }
 
-    fun rename(name: String) {
+    /**
+     * 改名称与描述。
+     *
+     * 两个字段走的是**同一次** `PATCH`：拆成两次请求的话，用户同时改了名称和描述、其中一次
+     * 失败，歌单就会停在一个只改了一半的状态。描述提交空串 = 清掉它（省略字段才是保持原值）。
+     */
+    fun updateInfo(name: String, description: String) {
         val current = _state.value.playlist ?: return
+        val newName = name.trim()
+        val newDescription = description.trim()
         viewModelScope.launch {
-            runCatching { library.updatePlaylist(current.id, name.trim(), null) }
+            runCatching { library.updatePlaylist(current.id, newName, newDescription) }
                 .onSuccess {
                     _state.update {
-                        it.copy(playlist = current.copy(name = name.trim()), message = "已重命名")
+                        it.copy(
+                            // 就地更新，不必为一个名称再拉一次详情。
+                            playlist = current.copy(name = newName, description = newDescription),
+                            message = "歌单信息已更新",
+                        )
                     }
                 }
                 .onFailure { error -> _state.update { it.copy(message = error.friendlyMessage()) } }

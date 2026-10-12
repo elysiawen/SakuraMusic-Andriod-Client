@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -48,13 +49,20 @@ fun SakuraTopBar(
     subtitle: String? = null,
     onBack: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
+    /**
+     * 是否自己让开状态栏。
+     *
+     * 默认让开——应用是 edge-to-edge 的，窗口画到状态栏下面。只有一种情况要关掉：
+     * 调用方在外面统一让开，比如发现页要让顶栏和它下面的搜索栏共用同一份状态栏间距，
+     * 顶栏收起来时那份间距也得留着，否则搜索栏会钻到状态栏底下。
+     */
+    statusBarPadding: Boolean = true,
     actions: @Composable RowScope.() -> Unit = {},
 ) {
     Row(
         modifier = modifier
             .fillMaxWidth()
-            // 应用是 edge-to-edge 的：窗口画到状态栏下面，所以顶栏要自己让开。
-            .statusBarsPadding()
+            .then(if (statusBarPadding) Modifier.statusBarsPadding() else Modifier)
             .padding(start = if (onBack != null) 8.dp else 20.dp, end = 12.dp, top = 10.dp, bottom = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -156,13 +164,21 @@ fun StateMessage(
     }
 }
 
-/** Blocking spinner with a caption. */
+/**
+ * Blocking spinner with a caption.
+ *
+ * 整屏用它时会把转圈放在正中间。之前是「贴着顶」的：放进整屏的 Box 里之后，
+ * 一个圈悬在顶上、下面一大片空白，看着像这一页什么都没加载出来。放进列表项里用它
+ * 仍然是按内容高度撑开的（lazy 列表的高度约束无界，`fillMaxSize` 会退化成原高度），
+ * 所以那种用法不受影响。
+ */
 @Composable
 fun LoadingState(message: String? = null, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .padding(vertical = 44.dp),
+        verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         CircularProgressIndicator(strokeWidth = 3.dp, modifier = Modifier.size(34.dp))
