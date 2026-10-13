@@ -26,7 +26,7 @@ val releaseStoreFile = keystoreProps.getProperty("storeFile")
 
 android {
     namespace = "com.sakura.music"
-    compileSdk = 35
+    compileSdk = 36
 
     signingConfigs {
         if (releaseStoreFile != null) {

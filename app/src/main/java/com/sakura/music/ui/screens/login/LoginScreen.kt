@@ -183,15 +183,6 @@ fun LoginScreen() {
                     enabled = state.canSubmit,
                     loading = state.busy,
                 )
-
-                if (state.registerMode) {
-                    Spacer(Modifier.height(10.dp))
-                    Text(
-                        text = "第一个注册的用户会成为管理员",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
             }
 
             Spacer(Modifier.height(22.dp))

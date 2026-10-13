@@ -15,6 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Logout
 import androidx.compose.material.icons.rounded.QrCode
 import androidx.compose.material3.AlertDialog
@@ -54,14 +55,19 @@ import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.SectionHeader
 import com.sakura.music.ui.components.SettingRow
 import com.sakura.music.ui.components.SnackbarMessages
+import com.sakura.music.ui.components.TogetherSheet
+import com.sakura.music.ui.components.TogetherStats
+import com.sakura.music.ui.components.rememberTogetherOverview
+import com.sakura.music.ui.components.rememberTogetherSubtitle
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
 
 /**
- * 账户资料。
+ * 账户中心：账号资料。
  *
  * 从账号页的头像那一栏进来，装的是「会改到账号本身」的东西：昵称与头像、密码、
- * 第三方账号绑定情况、退出登录。外观与播放偏好不在这里——那些在设置页。
+ * 第三方账号绑定情况、退出登录，最后是**一起听**那一栏（房间入口 + 累计读数，
+ * 与网页端账户中心同一栏、同样排在最后）。外观与播放偏好不在这里——那些在设置页。
  */
 @Composable
 fun AccountDetailScreen(navigator: SakuraNavigator) {
@@ -74,6 +80,11 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
     var editingProfile by remember { mutableStateOf(false) }
     var changingPassword by remember { mutableStateOf(false) }
     var loggingOut by remember { mutableStateOf(false) }
+    var showTogether by remember { mutableStateOf(false) }
+
+    // 一起听那一栏：说明行（在不在房间、放音在哪台）与累计读数，与账号页那一栏同一份。
+    val togetherSubtitle = rememberTogetherSubtitle()
+    val togetherOverview = rememberTogetherOverview()
 
     val user = auth.user
     val current = state
@@ -163,6 +174,34 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
                             },
                         )
                     }
+
+                    /*
+                     * 一起听排在最末：它是「你和另一个人的事」，与上面那些「这个账号本身」的
+                     * 东西不同类，放最后既不打断账号资料的连贯，也顺手给了一个入口。
+                     * 与网页端账户中心同一栏、同样在最后（那边是从这个位置挪过去的）。
+                     */
+                    Spacer(Modifier.height(22.dp))
+                    SectionHeader("一起听", modifier = Modifier.padding(start = 22.dp))
+                    SakuraCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        SettingRow(
+                            title = "一起听",
+                            subtitle = togetherSubtitle,
+                            onClick = { showTogether = true },
+                            trailing = {
+                                Icon(
+                                    imageVector = Icons.Rounded.KeyboardArrowRight,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            },
+                        )
+                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                        // 累计读数：这就是「账户中心的一起听统计」那一块。
+                        TogetherStats(
+                            overview = togetherOverview,
+                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+                        )
+                    }
                 }
 
                 Spacer(Modifier.height(24.dp))
@@ -211,6 +250,13 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
                 viewModel.logout()
             },
             onDismiss = { loggingOut = false },
+        )
+    }
+
+    if (showTogether) {
+        TogetherSheet(
+            onDismiss = { showTogether = false },
+            onMessage = viewModel::showMessage,
         )
     }
 }

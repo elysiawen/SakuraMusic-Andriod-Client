@@ -59,6 +59,16 @@ fun describePlaybackError(error: PlaybackException?): String {
         PlaybackException.ERROR_CODE_DECODER_QUERY_FAILED,
         -> "解码器初始化失败"
 
+        /*
+         * 播放器内部冒出来的运行时异常。ExoPlayer 给这种错误的原文就是
+         * "Unexpected runtime error"——那句英文既是用户看不懂，又容易被当成「这首歌坏了」，
+         * 而它其实与音频、网络都无关（有时甚至不影响播放）。原始细节留在日志里
+         * （见 `PlaybackCenter.onPlayerError`），这里只给一句「可以重试」。
+         */
+        PlaybackException.ERROR_CODE_UNSPECIFIED,
+        PlaybackException.ERROR_CODE_FAILED_RUNTIME_CHECK,
+        -> "播放器内部错误，可重试"
+
         else -> error.message?.takeIf { it.isNotBlank() } ?: "播放失败"
     }
 }

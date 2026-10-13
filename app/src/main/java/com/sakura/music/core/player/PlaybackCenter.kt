@@ -1,5 +1,6 @@
 package com.sakura.music.core.player
 
+import android.util.Log
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.common.PlaybackException
@@ -183,6 +184,9 @@ class PlaybackCenter(
     private var preferredPlatform: Platform? = null
     private var pollJob: Job? = null
 
+    /** 报错之后的复检（见 [verifyPlayerHealthy]）：每次报错只留最新那一个。 */
+    private var errorCheckJob: Job? = null
+
     /**
      * 暂停落盘（一起听接管期间）。
      *
@@ -193,6 +197,14 @@ class PlaybackCenter(
 
     /** 房间接管期间：播放顺序（循环 / 随机）由房间决定，用户设置暂时让位。 */
     private var roomPlayMode = false
+
+    /**
+     * 已经下发给播放器的速率。
+     *
+     * 镜像（设备跟随 / 一起听）每 200 毫秒算一次偏差，但结论多数时候是「保持」；
+     * 靠这个记着上次真正发出去的值，就不必每秒五次白发一条跨进程命令（见 [setPlaybackSpeed]）。
+     */
+    private var appliedSpeed = 1f
 
     /**
      * 房间接管时的播放意图转交口，见 [RoomPlaybackBridge]。
@@ -261,6 +273,9 @@ class PlaybackCenter(
                 return@launch
             }
             controller.addListener(listener)
+            // 记住播放器**当前实际**的速率：镜像那边是「设过了就不再设」，值不能凭默认猜——
+            // 换一个控制器接上来时，播放器可能还留着上一次留下的 ±5%。
+            appliedSpeed = controller.playbackParameters.speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
             syncQueue()
             syncFlags()
             _state.update { it.copy(positionMs = controller.currentPosition.coerceAtLeast(0L)) }
@@ -332,6 +347,22 @@ class PlaybackCenter(
         }
 
         override fun onPlayerError(error: PlaybackException) {
+            /*
+             * 原始信息留在日志里。
+             *
+             * 翻成中文之后，「Unexpected runtime error」这种话什么也说明不了：它是 ExoPlayer
+             * 对「内部冒出来的运行时异常」的统一说法，错在哪儿只有 errorCode 与 cause 链知道。
+             * 真出问题时这份日志就是唯一线索（`adb logcat -s SakuraPlayback`）。
+             */
+            Log.w(
+                LOG_TAG,
+                "player error: code=${error.errorCode}" +
+                    "(${PlaybackException.getErrorCodeName(error.errorCode)})" +
+                    " state=${controller?.playbackState}" +
+                    " track=${_state.value.current?.key}" +
+                    " message=${error.message}",
+                error,
+            )
             _state.update {
                 it.copy(
                     error = describePlaybackError(error),
@@ -340,6 +371,31 @@ class PlaybackCenter(
                     unplayableKey = it.current?.key?.takeIf { _ -> isUnplayableFailure(error) },
                 )
             }
+            verifyPlayerHealthy()
+        }
+    }
+
+    /**
+     * 报错之后隔一小会儿再看一眼播放器：它要是好好的，就把这条错误收回去。
+     *
+     * 「无法播放」那张卡片说的是一件很确定的事——**这首歌放不出来**。可 ExoPlayer 也会报
+     * 与正在播的这一首无关的错误：命令层面、内部状态层面的失败都被它归成
+     * `Unexpected runtime error`，而声音照常在走。此时卡片在那儿说放不了，而且它只会被
+     * 下一次换歌清掉——于是就成了「明明在播，却一直说无法播放」。
+     *
+     * 判据交给播放器自己：真出问题（取流失败、解析失败）时它会落到 IDLE，这条错误就留着，
+     * 让用户去重试；反之（READY，还能继续播）就撤销它。撤销也记一条日志——问题可以自愈，
+     * 但不该消失得无影无踪。
+     */
+    private fun verifyPlayerHealthy() {
+        errorCheckJob?.cancel()
+        errorCheckJob = mainScope.launch {
+            delay(ERROR_VERIFY_MS)
+            val active = controller ?: return@launch
+            if (active.playbackState != Player.STATE_READY) return@launch
+            if (_state.value.error == null) return@launch
+            Log.i(LOG_TAG, "player is READY ${ERROR_VERIFY_MS}ms after the error; withdrawing it")
+            _state.update { it.copy(error = null) }
         }
     }
 
@@ -732,6 +788,16 @@ class PlaybackCenter(
      */
     fun setPlaybackSpeed(speed: Float) {
         val target = speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
+        /*
+         * 设过了就不再设。
+         *
+         * 镜像循环每 200 毫秒算一次偏差，多数时候结论都是「维持现在的速率」——照直下发
+         * 就是每秒五次跨进程命令，一路发下去。命令是白发的（值没变），而每一条都有失败的可能，
+         * 失败会被播放器报成一条错误（`Unexpected runtime error`），用户看到的就是
+         * 「明明在播，却弹无法播放」。所以这里做成幂等：真的变了才发。
+         */
+        if (target == appliedSpeed) return
+        appliedSpeed = target
         mainScope.launch { controller?.setPlaybackSpeed(target) }
     }
 
@@ -742,7 +808,7 @@ class PlaybackCenter(
      * 而用户根本不知道问题出在哪。
      */
     fun resetPlaybackSpeed() {
-        mainScope.launch { controller?.setPlaybackSpeed(1f) }
+        setPlaybackSpeed(1f)
     }
 
     fun next() {
@@ -957,3 +1023,14 @@ private const val PERSIST_EVERY_TICKS = 37
 /** 跟随调速的允许范围。实际只在 1±0.05 上用，这里兜个底，防止意外的值灌进来。 */
 private const val MIN_PLAYBACK_SPEED = 0.5f
 private const val MAX_PLAYBACK_SPEED = 2f
+
+/**
+ * 报错之后隔多久复检一次「播放器是不是其实好好的」。
+ *
+ * 取 1.5 秒：够 ExoPlayer 把内部状态落定（真失败会落到 IDLE），又不至于让一条假错误
+ * 在屏幕上挂太久。来源不明的错误大多是「报完就没事了」，这个窗口能把它认出来。
+ */
+private const val ERROR_VERIFY_MS = 1_500L
+
+/** 播放相关的日志标签：真出问题时 `adb logcat -s SakuraPlayback` 一条条看。 */
+private const val LOG_TAG = "SakuraPlayback"
