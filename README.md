@@ -5,12 +5,17 @@ Sakura Music 的 Android 客户端。Kotlin + Jetpack Compose + Media3（ExoPlay
 
 - 播放：Media3 / ExoPlayer，支持 CDN 直连与网关中转，缓存后离线可播
 - 多设备：同一账号下的设备互相可见、可互相遥控，也能把正在播的队列连进度一起交接过去
+- 一起听：和朋友共享同一个播放现场（6 位房间码 / 邀请链接），任一方都能切歌、暂停、拖进度，
+  两端镜像同一首歌的同一进度；同账号的第二台设备自动成为「旁观」，可一键「把播放转移到本机」
 - 音乐库：自建歌单、收藏（「我喜欢的音乐」）、播放历史、本地下载
 - 本地缓存：音频、封面、歌词与歌曲信息，容量与有效期都可在设置里调
 - 音源：网易云音乐 / QQ 音乐（经自建网关）
 
 多设备那套协议的细节（设备身份、SSE 事件、`transfer` / `release` 时序）见
-[`docs/connect-protocol.md`](docs/connect-protocol.md)。
+[`docs/connect-protocol.md`](docs/connect-protocol.md)；
+「一起听」（房间）的协议与席位 / 旁观 / 「转移到本机」语义见工作区里的
+[`sakura-music/docs/together-protocol.md`](../sakura-music/docs/together-protocol.md)
+（客户端实现见 `app/src/main/java/com/sakura/music/core/player/RoomSync.kt`）。
 
 ## 构建
 

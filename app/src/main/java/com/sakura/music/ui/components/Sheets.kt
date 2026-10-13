@@ -153,7 +153,11 @@ fun QueueSheet(
     currentIndex: Int,
     onPlayAt: (Int) -> Unit,
     onRemoveAt: (Int) -> Unit,
-    onClear: () -> Unit,
+    /**
+     * 清空整条队列。给 null 表示**不给清空**——一起听的队列是共享的，
+     * 一个人「清空」等于把对方正在听的歌也抹掉，所以那种情况下这个动作不出现。
+     */
+    onClear: (() -> Unit)?,
     onDismiss: () -> Unit,
 ) {
     val listState = rememberLazyListState()
@@ -166,7 +170,7 @@ fun QueueSheet(
         title = "播放队列（${tracks.size}）",
         onDismiss = onDismiss,
         trailing = {
-            if (tracks.isNotEmpty()) {
+            if (tracks.isNotEmpty() && onClear != null) {
                 TextButton(onClick = onClear) { Text("清空") }
             }
         },

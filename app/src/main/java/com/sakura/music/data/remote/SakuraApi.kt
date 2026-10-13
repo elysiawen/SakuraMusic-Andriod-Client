@@ -31,9 +31,16 @@ import com.sakura.music.data.model.TrackDetail
 import com.sakura.music.data.model.TrackListResponse
 import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.data.model.UserResponse
+import com.sakura.music.data.room.CreateRoomBody
+import com.sakura.music.data.room.DeviceIdBody
+import com.sakura.music.data.room.JoinRoomBody
+import com.sakura.music.data.room.RoomCodeResponse
+import com.sakura.music.data.room.RoomPreview
+import com.sakura.music.data.room.TogetherOverview
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.decodeFromJsonElement
 import kotlinx.serialization.json.encodeToJsonElement
@@ -68,6 +75,12 @@ class SakuraApi(
          */
         const val DEFAULT_LYRIC_TTL_MILLIS = 30L * 24 * 60 * 60 * 1000  // 30 天
         const val DEFAULT_META_TTL_MILLIS = 7L * 24 * 60 * 60 * 1000    // 7 天
+
+        /**
+         * 房间类型。多人房（`group`）服务端尚未开放，会返回 `room_kind_unsupported`，
+         * 所以当前只创建双人房。
+         */
+        const val ROOM_KIND_DUO = "duo"
     }
 
     /* ------------------------------ 探活 ------------------------------ */
@@ -364,7 +377,113 @@ class SakuraApi(
         deserializer = OkResponse.serializer(),
     )
 
+    /* ------------------------------ 一起听（房间） ------------------------------ */
+
+    /** 网关地址：邀请链接要靠它拼（`<网关>/together?code=XXXXXX`）。 */
+    fun gatewayBaseUrl(): String = client.baseUrl()
+
+    /**
+     * 创建房间。
+     *
+     * [queue] 是可选的初始歌单——一起听一般就从「你现在正在听的那一队列」开始，
+     * 所以调用方通常直接把本机队列当种子递进来。
+     */
+    suspend fun createRoom(
+        deviceId: String,
+        name: String?,
+        deviceKind: String?,
+        queue: List<UnifiedTrack>,
+        index: Int,
+        kind: String = ROOM_KIND_DUO,
+    ): RoomCodeResponse = client.request(
+        method = "POST",
+        path = "/api/rooms/create",
+        deserializer = RoomCodeResponse.serializer(),
+        body = json.encodeToJsonElement(
+            CreateRoomBody.serializer(),
+            CreateRoomBody(
+                deviceId = deviceId,
+                name = name,
+                deviceKind = deviceKind,
+                kind = kind,
+                queue = queue,
+                index = index,
+            ),
+        ),
+    )
+
+    suspend fun joinRoom(
+        code: String,
+        deviceId: String,
+        name: String?,
+        deviceKind: String?,
+    ): OkResponse = client.request(
+        method = "POST",
+        path = "/api/rooms/join",
+        deserializer = OkResponse.serializer(),
+        body = json.encodeToJsonElement(
+            JoinRoomBody.serializer(),
+            JoinRoomBody(code = code, deviceId = deviceId, name = name, deviceKind = deviceKind),
+        ),
+    )
+
+    /** 自己退出（房间还有人就继续）。 */
+    suspend fun leaveRoom(deviceId: String): OkResponse =
+        client.request(
+            method = "POST",
+            path = "/api/rooms/leave",
+            deserializer = OkResponse.serializer(),
+            body = deviceIdBody(deviceId),
+        )
+
+    /** 解散 / 结束房间（双人房人人可解散）。 */
+    suspend fun dissolveRoom(deviceId: String): OkResponse =
+        client.request(
+            method = "POST",
+            path = "/api/rooms/dissolve",
+            deserializer = OkResponse.serializer(),
+            body = deviceIdBody(deviceId),
+        )
+
+    /**
+     * 提交一个播放动作（`play` / `pause` / `seek` / `add` / `ended` …）。
+     *
+     * 服务端是权威：客户端只提交意图，等它广播回来再统一应用，本地不做抢先执行。
+     */
+    suspend fun roomAction(deviceId: String, action: String, payload: JsonObject?): OkResponse =
+        client.request(
+            method = "POST",
+            path = "/api/rooms/action",
+            deserializer = OkResponse.serializer(),
+            body = buildJsonObject {
+                put("deviceId", deviceId)
+                put("action", action)
+                // 没有 payload 的动作（play/pause/next…）就不带这个字段。
+                payload?.let { put("payload", it) }
+            },
+        )
+
+    /**
+     * 入房前的预览（也用来对账「这个房间还在不在」）。
+     *
+     * 响应里的 `mine` 是本账号席位所在的设备 id：冷启动靠它判断该不该把席位接回来。
+     */
+    suspend fun roomPreview(code: String): RoomPreview =
+        client.request(
+            method = "GET",
+            path = "/api/rooms/${encode(code)}",
+            deserializer = RoomPreview.serializer(),
+        )
+
+    /** 我的一起听总览（账户中心用）。 */
+    suspend fun roomOverview(): TogetherOverview =
+        client.request("GET", "/api/rooms/overview", TogetherOverview.serializer())
+
     /* ------------------------------ 工具 ------------------------------ */
+
+    /** `leave` / `dissolve` 只有设备 id 一个字段。 */
+    private fun deviceIdBody(deviceId: String): JsonElement =
+        json.encodeToJsonElement(DeviceIdBody.serializer(), DeviceIdBody(deviceId))
 
     /** 写库时把整首歌原样回传即可；这里只补一个库端会算的 key。 */
     private fun trackJson(track: UnifiedTrack): JsonElement =

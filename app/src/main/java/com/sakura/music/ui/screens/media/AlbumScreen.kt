@@ -74,7 +74,7 @@ fun AlbumScreen(
                 detail?.album?.releaseDate.orEmpty(),
             ).filter { it.isNotBlank() }.joinToString(" · "),
             stats = trackListStats(tracks),
-            onPlayAll = { container.playbackCenter.play(tracks, 0) },
+            onPlayAll = { container.playbackCenter.playAll(tracks) },
             playAllEnabled = tracks.isNotEmpty(),
         ),
         // 一首都没取到：整页换成它（头部也不再显示）。

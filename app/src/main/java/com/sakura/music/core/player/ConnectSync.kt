@@ -318,7 +318,8 @@ class ConnectSync(
         } else {
             0L
         }
-        playback.play(tracks, index, startMs)
+        // 直接驱动：接管 / 交接是设备之间的事，不该被本机所在的房间拦下来改成「点歌」。
+        playback.playDirect(tracks, index, startMs)
     }
 
     /* ------------------------------ 界面用的动作 ------------------------------ */
@@ -476,7 +477,8 @@ class ConnectSync(
             // 曲目不同：用 `sources` 重建它正放着的那首，并从同一个进度起播。
             // 重建不出来（对方没带 sources）只能不动——这正是协议要求 sources 的原因。
             val rebuilt = summary.toUnifiedTrack() ?: return
-            playback.play(listOf(rebuilt), 0, livePositionMs(state))
+            // 跟随是**单向镜像**，本身就是"把队列装进播放器"，走直接通道。
+            playback.playDirect(listOf(rebuilt), 0, livePositionMs(state))
             if (!state.playing) playback.pause()
             return
         }

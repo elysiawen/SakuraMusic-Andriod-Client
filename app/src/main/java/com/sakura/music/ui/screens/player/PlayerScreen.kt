@@ -6,7 +6,9 @@ import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -34,10 +36,15 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Cached
 import androidx.compose.material.icons.rounded.Cast
+import androidx.compose.material.icons.rounded.ChevronRight
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Favorite
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material.icons.rounded.Lyrics
@@ -114,16 +121,20 @@ import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.remote.friendlyMessage
+import com.sakura.music.data.room.RoomMemberView
 import com.sakura.music.ui.appContainer
+import com.sakura.music.ui.components.AccountAvatar
 import com.sakura.music.ui.components.AddToPlaylistSheet
 import com.sakura.music.ui.components.ChoiceSheet
 import com.sakura.music.ui.components.DeviceSheet
 import com.sakura.music.ui.components.PlaybackErrorCard
 import com.sakura.music.ui.components.QueueSheet
 import com.sakura.music.ui.components.SnackbarMessages
+import com.sakura.music.ui.components.TogetherSheet
 import com.sakura.music.ui.components.TrackActionsSheet
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.util.formatDuration
+import com.sakura.music.ui.util.formatTogetherDuration
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -176,9 +187,103 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
     var showActions by remember { mutableStateOf(false) }
     var showAddToPlaylist by remember { mutableStateOf(false) }
     var showDevices by remember { mutableStateOf(false) }
+    var showTogether by remember { mutableStateOf(false) }
 
     // 拖动进度时歌词跟着走（但不打扰播放器）；松手后回到真实进度。
     var scrubPosition by remember { mutableStateOf<Long?>(null) }
+
+    /*
+     * 房间接管期间，传输控制与进度**一律走房间**。
+     *
+     * 直接动本地播放器是没用的：镜像循环每 200 毫秒就会把它拽回房间状态，
+     * 表现成「点了暂停，一秒后又自己播起来」。只有把意图提交给房间、等它广播回来，
+     * 两台设备才会一起动。
+     */
+    val roomCode by container.roomSync.code.collectAsStateWithLifecycle()
+    val room by container.roomSync.room.collectAsStateWithLifecycle()
+    val spectating by container.roomSync.spectating.collectAsStateWithLifecycle()
+
+    /** 账号在房间里（可能放音在另一台设备上）。 */
+    val inRoom = roomCode != null
+
+    /**
+     * 房间的播放**就在本机**。
+     *
+     * 传输控制与队列都按它分流：旁观时（同账号的另一台在放）本机还是本机的播放器，
+     * 照席位去发指令只会一条条撞上「你不在这个房间里」。
+     */
+    val seatHere = inRoom && !spectating
+
+    /*
+     * 一起听读数（「我们一起听了 …」）的每秒节拍。
+     *
+     * 播放中播放状态每 400 毫秒就会变一次（进度在动），但如果**暂停着**，那一份状态是等值的，
+     * 状态流不发射、也就不会重组，读数会僵在那儿。所以在房间里单独起一个每秒的节拍。
+     */
+    var togetherTick by remember { mutableIntStateOf(0) }
+    LaunchedEffect(inRoom) {
+        if (!inRoom) return@LaunchedEffect
+        while (true) {
+            delay(1_000)
+            togetherTick++
+        }
+    }
+    /**
+     * 封面下沿那句话。
+     *
+     * 席位在本机时是「我们一起听了多久」；旁观时（同账号的另一台在放）必须换成
+     * 「播放不在这台设备上、在哪台上」——照旧写时长的话，用户只会以为这台设备哑了。
+     *
+     * 设备名也要进 remember 的键：它在**第一次**收到快照时才从 null 变成名字，
+     * 而那一刻累计时长很可能还是 0，光看时长是看不出要重算的。
+     */
+    val togetherSeatName = container.roomSync.seatDeviceName()
+    val togetherBadgeText = remember(
+        togetherTick,
+        room?.togetherSeconds,
+        room?.togetherCounting,
+        spectating,
+        togetherSeatName,
+    ) {
+        if (!spectating) {
+            formatTogetherDuration(container.roomSync.togetherLiveSeconds())
+        } else {
+            togetherSeatName?.let { "一起听在「$it」上播放" } ?: "一起听在另一台设备上播放"
+        }
+    }
+
+    fun seekTo(positionMs: Long) {
+        if (seatHere) container.roomSync.seek(positionMs / 1000.0) else container.playbackCenter.seekTo(positionMs)
+    }
+
+    fun toggleTransport() {
+        if (seatHere) container.roomSync.toggle() else container.playbackCenter.toggle()
+    }
+
+    fun previousTrack() {
+        if (seatHere) container.roomSync.prev() else container.playbackCenter.previous()
+    }
+
+    fun nextTrack() {
+        if (seatHere) container.roomSync.next() else container.playbackCenter.next()
+    }
+
+    /**
+     * 把一起听的播放从同账号的另一台设备接到本机。
+     *
+     * 就是 `join`：服务端「一个账号只占一个席位」，join 的语义本来就是接席位；
+     * 对面会收到「席位已被接走」，降级为旁观——那台设备上房间照旧显示着，随时能再转移回去。
+     */
+    var transferring by remember { mutableStateOf(false) }
+    fun transferHere() {
+        val target = roomCode ?: return
+        if (transferring) return
+        transferring = true
+        scope.launch {
+            container.roomSync.join(target)
+            transferring = false
+        }
+    }
 
     // 错误卡片退场时 content 里已经读不到错误了，留一份最后的内容给它放完动画。
     var lastError by remember { mutableStateOf<String?>(null) }
@@ -331,6 +436,32 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     }
                     Spacer(Modifier.width(6.dp))
                 }
+                // 一起听：和朋友在两个客户端上同步听同一首歌。
+                // 在房间里时图标染成强调色并带一个小圆点——不然退出去看别的页面回来，
+                // 光从一个灰图标上分不出自己还在不在房间里。
+                IconButton(onClick = { showTogether = true }) {
+                    Box(contentAlignment = Alignment.TopEnd) {
+                        Icon(
+                            imageVector = Icons.Rounded.Groups,
+                            contentDescription = "一起听",
+                            tint = if (inRoom) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                        )
+                        if (inRoom) {
+                            Box(
+                                modifier = Modifier
+                                    .padding(top = 3.dp, end = 1.dp)
+                                    .size(7.dp)
+                                    .clip(CircleShape)
+                                    .background(MaterialTheme.colorScheme.primary),
+                            )
+                        }
+                    }
+                }
+
                 // 投送到其它设备：同一账号下的设备互相可见，可以把播放交接过去。
                 IconButton(onClick = { showDevices = true }) {
                     Icon(
@@ -381,6 +512,15 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                                     .align(Alignment.TopEnd)
                                     .padding(10.dp),
                             )
+                            if (inRoom) {
+                                TogetherCoverBand(
+                                    text = togetherBadgeText,
+                                    me = container.roomSync.myAccountMember(),
+                                    partner = container.roomSync.otherMember(),
+                                    onClick = { showTogether = true },
+                                    modifier = Modifier.align(Alignment.BottomCenter),
+                                )
+                            }
                         }
                         Spacer(Modifier.height(12.dp))
                         TrackInfo(title = track.title, subtitle = subtitle, trial = state.trial)
@@ -390,7 +530,7 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                             durationMs = state.durationMs,
                             onScrub = { scrubPosition = it },
                             onSeek = {
-                                container.playbackCenter.seekTo(it)
+                                seekTo(it)
                                 scrubPosition = null
                             },
                         )
@@ -399,11 +539,14 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                             isPlaying = state.isPlaying,
                             canSkip = state.queue.size > 1,
                             playMode = playMode,
-                            onPlayMode = container.playbackCenter::cyclePlayMode,
+                            onPlayMode = {
+                        // 房间接管期间播放顺序由服务端统一决定：改本机的没有意义，改了也会被覆盖。
+                        if (seatHere) message = "一起听期间由房间统一控制播放顺序" else container.playbackCenter.cyclePlayMode()
+                    },
                             onQueue = { showQueue = true },
-                            onPrevious = container.playbackCenter::previous,
-                            onToggle = container.playbackCenter::toggle,
-                            onNext = container.playbackCenter::next,
+                            onPrevious = { previousTrack() },
+                            onToggle = { toggleTransport() },
+                            onNext = { nextTrack() },
                         )
                     }
 
@@ -414,7 +557,7 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                         currentIndex = currentLyricIndex,
                         synced = syncedLyrics,
                         loading = state.lyricLoading,
-                        onSeek = container.playbackCenter::seekTo,
+                        onSeek = { seekTo(it) },
                         modifier = Modifier
                             .weight(0.58f)
                             .fillMaxHeight()
@@ -442,6 +585,36 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                             .align(Alignment.TopEnd)
                             .padding(10.dp),
                     )
+                    // 在房间里：封面下沿压上两人的头像与一起听读数（见 TogetherCoverBand）。
+                    if (inRoom) {
+                        TogetherCoverBand(
+                            text = togetherBadgeText,
+                            // 「我」按账号维度认（`me` 是设备级的，旁观时自己那条也是 false）。
+                            me = container.roomSync.myAccountMember(),
+                            partner = container.roomSync.otherMember(),
+                            onClick = { showTogether = true },
+                            modifier = Modifier.align(Alignment.BottomCenter),
+                        )
+                    }
+                }
+
+                /*
+                 * 播放不在这台设备上：把「转移过来」直接摆在这一页。
+                 *
+                 * 面板里当然也有，但用户大概率是先在播放页发现「歌在别处响」的——
+                 * 让他还要先点开面板找一遍，不如就在这条提示下面给一个按钮。
+                 */
+                if (inRoom && spectating) {
+                    Spacer(Modifier.height(10.dp))
+                    FilledTonalButton(onClick = ::transferHere, enabled = !transferring) {
+                        Icon(
+                            imageVector = Icons.Rounded.SwapHoriz,
+                            contentDescription = null,
+                            modifier = Modifier.size(17.dp),
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Text(text = if (transferring) "转移中…" else "把播放转移到本机")
+                    }
                 }
 
                 Spacer(Modifier.height(18.dp))
@@ -455,7 +628,7 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     currentIndex = currentLyricIndex,
                     synced = syncedLyrics,
                     loading = state.lyricLoading,
-                    onSeek = container.playbackCenter::seekTo,
+                    onSeek = { seekTo(it) },
                     modifier = Modifier
                         .weight(1f)
                         .fillMaxWidth(),
@@ -468,7 +641,7 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     durationMs = state.durationMs,
                     onScrub = { scrubPosition = it },
                     onSeek = {
-                        container.playbackCenter.seekTo(it)
+                        seekTo(it)
                         scrubPosition = null
                     },
                 )
@@ -479,11 +652,14 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     isPlaying = state.isPlaying,
                     canSkip = state.queue.size > 1,
                     playMode = playMode,
-                    onPlayMode = container.playbackCenter::cyclePlayMode,
+                    onPlayMode = {
+                        // 房间接管期间播放顺序由服务端统一决定：改本机的没有意义，改了也会被覆盖。
+                        if (seatHere) message = "一起听期间由房间统一控制播放顺序" else container.playbackCenter.cyclePlayMode()
+                    },
                     onQueue = { showQueue = true },
-                    onPrevious = container.playbackCenter::previous,
-                    onToggle = container.playbackCenter::toggle,
-                    onNext = container.playbackCenter::next,
+                    onPrevious = { previousTrack() },
+                    onToggle = { toggleTransport() },
+                    onNext = { nextTrack() },
                 )
 
                 Spacer(Modifier.height(30.dp))
@@ -523,11 +699,18 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
 
     if (showQueue) {
         QueueSheet(
+            // 房间接管时队列就是房间队列（镜像过来的），所以显示不用分岔；
+            // 只有「改队列」这件事必须交给房间——本地删一首，200 毫秒后就会被镜像装回来。
             tracks = state.queue,
             currentIndex = state.index,
-            onPlayAt = container.playbackCenter::playAt,
-            onRemoveAt = container.playbackCenter::removeAt,
-            onClear = container.playbackCenter::clearQueue,
+            onPlayAt = { index ->
+                if (seatHere) container.roomSync.playAt(index) else container.playbackCenter.playAt(index)
+            },
+            onRemoveAt = { index ->
+                if (seatHere) container.roomSync.removeAt(index) else container.playbackCenter.removeAt(index)
+            },
+            // 共享队列没有「清空」：那等于把对方正在听的歌也一起抹掉。
+            onClear = if (seatHere) null else container.playbackCenter::clearQueue,
             onDismiss = { showQueue = false },
         )
     }
@@ -593,7 +776,156 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
             onMessage = { message = it },
         )
     }
+
+    if (showTogether) {
+        TogetherSheet(
+            onDismiss = { showTogether = false },
+            onMessage = { message = it },
+        )
+    }
 }
+
+/* ------------------------------ 一起听（封面下沿那一条） ------------------------------ */
+
+/**
+ * 封面下沿那一块：两个人的头像（中间一个回形针）＋ 一起听读数。
+ *
+ * 都压在封面**里面**：封面是这一页最贵的面积，头像与读数摆进去，就不必在封面下面
+ * 再多占一行——那一行会从歌词那儿抢走同样的高度。
+ *
+ * 上面铺一层从透明到半黑的渐变再压白字与头像：封面可能是任意一张图，浅色的、花哨的
+ * 都有，直接压上去有一半的封面读不清。渐变只铺下沿，封面主体还是完整的。
+ *
+ * 整块可点：打开一起听面板（房间码、时长、转移、结束都在那里）。
+ */
+@Composable
+private fun TogetherCoverBand(
+    text: String,
+    me: RoomMemberView?,
+    partner: RoomMemberView?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            // 和封面同一套圆角：不裁的话下面两个角会从封面的圆角里支出去。
+            .clip(MaterialTheme.shapes.small)
+            .background(TOGETHER_COVER_SCRIM)
+            .clickable(onClick = onClick)
+            .padding(top = 34.dp, bottom = 9.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            TogetherAvatar(member = me, fallback = "我", modifier = Modifier.size(34.dp))
+            /*
+             * 中间那个回形针＝「两个人被别在一起」。
+             *
+             * 不画「+」（看着像"再加一个人"）、也不画一条竖线（那是分隔符，不是关系）：
+             * 回形针是「别在一起」最直白的那个形象。
+             */
+            Icon(
+                imageVector = Icons.Rounded.AttachFile,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.9f),
+                modifier = Modifier
+                    .padding(horizontal = 9.dp)
+                    .size(18.dp),
+            )
+            TogetherAvatar(member = partner, fallback = "友", modifier = Modifier.size(34.dp))
+        }
+
+        Spacer(Modifier.height(8.dp))
+
+        Row(
+            modifier = Modifier.padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Favorite,
+                contentDescription = null,
+                // 固定这个粉红，不跟强调色走：它压在深色渐变上，强调色可能是深色系，
+                // 换一个用户调过的主题就看不见了。
+                tint = TOGETHER_HEART,
+                modifier = Modifier.size(14.dp),
+            )
+            Spacer(Modifier.width(6.dp))
+            Text(
+                text = text,
+                style = MaterialTheme.typography.labelSmall,
+                color = Color.White,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                // fill = false：文字短的时候让 Row 把它居中，长的时候就地省略号，不挤掉右边的箭头。
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Spacer(Modifier.width(2.dp))
+            Icon(
+                imageVector = Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = Color.White.copy(alpha = 0.85f),
+                modifier = Modifier.size(15.dp),
+            )
+        }
+    }
+}
+
+/**
+ * 封面上的一个头像；[member] 为 null（对方还没来）时画一个空位圈。
+ *
+ * 空位刻意做成**空心圈 + 加号**，而不是一个「已经有人、只是灰掉」的头像：
+ * 后者会让人以为房间里已经有别人的歌在放。
+ */
+@Composable
+private fun TogetherAvatar(
+    member: RoomMemberView?,
+    fallback: String,
+    modifier: Modifier = Modifier,
+) {
+    if (member == null) {
+        Box(
+            modifier = modifier.border(
+                // 压在深色渐变上，描边统一用白色系，不跟主题的描边色走（那可能是浅色的）。
+                border = BorderStroke(1.dp, Color.White.copy(alpha = 0.55f)),
+                shape = CircleShape,
+            ),
+            contentAlignment = Alignment.Center,
+        ) {
+            Icon(
+                imageVector = Icons.Rounded.Add,
+                contentDescription = "等待好友加入",
+                tint = Color.White.copy(alpha = 0.9f),
+                modifier = Modifier.size(15.dp),
+            )
+        }
+        return
+    }
+    AccountAvatar(
+        avatar = member.avatar,
+        fallbackInitial = member.nickname.takeIf { it.isNotBlank() }?.take(1) ?: fallback,
+        modifier = modifier,
+    )
+}
+
+/** 一起听读数里那颗心：暖粉，压在任何封面上都认得出来。 */
+private val TOGETHER_HEART = Color(0xFFFF5A79)
+
+/**
+ * 封面下沿那块的渐影（头像与读数底下那层从透明到黑的压暗）。
+ *
+ * 写成**显式停点**而不是三个等距颜色：三个等距的那条，在这么矮的一块上（约 95dp）
+ * 前 1/3 几乎是全透明的，而头像正好落在"还没怎么压暗"的那一段上——看着就像没铺渐变。
+ * 这里让头像所在的区间（约 35%–65%）就压到 0.2→0.45，到最底下 0.78。
+ *
+ * 只铺下沿：封面主体仍然完整（浅色、花哨的封面才需要它，但没必要为了它整张压暗）。
+ */
+private val TOGETHER_COVER_SCRIM = Brush.verticalGradient(
+    0.00f to Color.Transparent,
+    0.26f to Color.Black.copy(alpha = 0.14f),
+    0.50f to Color.Black.copy(alpha = 0.40f),
+    0.76f to Color.Black.copy(alpha = 0.64f),
+    1.00f to Color.Black.copy(alpha = 0.80f),
+)
 
 /** 竖屏封面占屏宽的比例。 */
 private const val COVER_WIDTH_FRACTION = 0.52f

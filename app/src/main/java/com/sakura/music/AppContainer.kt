@@ -9,6 +9,7 @@ import com.sakura.music.core.player.KeyAwareDataSource
 import com.sakura.music.core.player.PlaybackCenter
 import com.sakura.music.core.player.PlaybackResolver
 import com.sakura.music.core.player.PlaybackRouteTracker
+import com.sakura.music.core.player.RoomSync
 import com.sakura.music.core.player.SakuraDataSource
 import com.sakura.music.core.player.sakuraCacheKeyFactory
 import com.sakura.music.data.cache.CacheManager
@@ -24,6 +25,7 @@ import com.sakura.music.data.remote.ApiClient
 import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.repo.AuthRepository
 import com.sakura.music.data.repo.LibraryRepository
+import com.sakura.music.data.room.RoomCodeStore
 import com.sakura.music.data.session.LocalCredentialStore
 import com.sakura.music.data.session.SakuraCookieJar
 import kotlinx.coroutines.CoroutineScope
@@ -67,12 +69,23 @@ class AppContainer(private val appContext: Context) {
         // 多设备长连接跟着登录态走：没登录连上去只会 401，登出后也该立刻断开。
         // 离线（没能确认登录态）时不连——网络本来就不通，连也是白连。
         scope.launch {
+            /*
+             * 只在「确认登录过」之后才做登出清理。
+             *
+             * 首帧的登录态是「还没确认」，这时要是照登出处理，`roomSync.stop()` 会把本地
+             * 记着的房间码一起清掉——冷启动的自动回房就永远没机会发生了。
+             */
+            var started = false
             authRepository.state.collect { auth ->
                 if (auth.isLoggedIn && !auth.offline) {
-                    // 先把指令的订阅者建出来再连：指令是发给它的，晚一步就可能丢。
+                    // 先把指令与房间事件的订阅者建出来再连：它们都是发给订阅者的，晚一步就可能丢。
                     connectSync
+                    roomSync
                     connectClient.start()
+                    started = true
                 } else {
+                    if (started) roomSync.stop()
+                    started = false
                     connectClient.stop()
                 }
             }
@@ -376,6 +389,35 @@ class AppContainer(private val appContext: Context) {
             json = json,
             scope = scope,
         )
+    }
+
+    /* ------------------------------ 一起听 ------------------------------ */
+
+    /** 房间码落盘：房间状态靠重连补推就能回来，唯独「我在哪个房间」会随进程一起丢。 */
+    val roomCodeStore: RoomCodeStore by lazy { RoomCodeStore(appContext) }
+
+    /**
+     * 「一起听」房间语义：创建 / 加入 / 把播放器镜像到房间状态。
+     *
+     * 与 [connectSync] 是**互斥**的——两者都在驱动同一个播放器，入房会停掉设备跟随。
+     * 房间的实时事件不另开连接：`room` 与 `room-playback` 走 [connectClient] 那条 SSE。
+     */
+    val roomSync: RoomSync by lazy {
+        RoomSync(
+            client = connectClient,
+            api = api,
+            playback = playbackCenter,
+            following = connectSync,
+            store = roomCodeStore,
+            // 认「这个席位是不是我们账号的」要用它：设备级的 me 分不出旁观与对面那位。
+            currentUserId = { authRepository.state.value.user?.id },
+            json = json,
+            scope = scope,
+        ).also { sync ->
+            // 接上播放意图转交口：房间里「点一首歌 / 播放全部」要变成房间操作，
+            // 否则本地会先响起来，200 毫秒后又被镜像装回房间那一份。
+            playbackCenter.roomBridge = sync
+        }
     }
 
     val playbackCenter: PlaybackCenter by lazy {

@@ -80,7 +80,7 @@ fun FavoritesScreen(navigator: SakuraNavigator) {
             label = "收藏",
             stats = trackListStats(state.tracks),
             description = "在任意列表里点歌曲右侧的爱心，就会收藏到这里。",
-            onPlayAll = { container.playbackCenter.play(state.tracks, 0) },
+            onPlayAll = { container.playbackCenter.playAll(state.tracks) },
         ),
         absent = {
             StateMessage(

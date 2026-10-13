@@ -63,6 +63,48 @@ fun describePlaybackError(error: PlaybackException?): String {
     }
 }
 
+/**
+ * 这一首是不是「**确定**播不了」。
+ *
+ * 「一起听」拿它决定要不要上报让全员跳过，判错的代价很不对称：
+ * 把网络抖动误判成播不了，一首其实能放的歌会被两边一起跳掉；反过来漏判，
+ * 只是这台设备卡在错误页上、对方还在正常听。所以只认那些**重试也不会变**的失败。
+ */
+fun isUnplayableFailure(error: PlaybackException?): Boolean {
+    if (error == null) return false
+
+    causeChain(error).forEach { throwable ->
+        when (throwable) {
+            // 「仅 Wi-Fi」拦下的：这是本机的开关，换个网络就能放，不是这首的问题。
+            is MeteredBlockedException -> return false
+
+            // 取流被上游拒了（无版权 / 会员限制 / 根本没音源）：换台设备也一样放不出来。
+            // 网络类的 ApiException（连不上网关）不在此列。
+            is ApiException -> return !throwable.isNetworkError
+
+            is HttpDataSource.InvalidResponseCodeException -> return when (throwable.responseCode) {
+                // 被拒绝（401/403）与源已下架（404）都不会自己好起来。
+                401, 403, 404 -> true
+                else -> false
+            }
+
+            else -> Unit
+        }
+    }
+
+    return when (error.errorCode) {
+        PlaybackException.ERROR_CODE_IO_NO_PERMISSION,
+        PlaybackException.ERROR_CODE_IO_FILE_NOT_FOUND,
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_MALFORMED,
+        PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED,
+        PlaybackException.ERROR_CODE_PARSING_MANIFEST_MALFORMED,
+        PlaybackException.ERROR_CODE_PARSING_MANIFEST_UNSUPPORTED,
+        -> true
+
+        else -> false
+    }
+}
+
 private fun causeChain(error: Throwable): List<Throwable> {
     val chain = mutableListOf<Throwable>()
     var current: Throwable? = error

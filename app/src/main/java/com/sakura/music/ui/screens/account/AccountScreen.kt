@@ -18,6 +18,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
@@ -45,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sakura.music.data.model.Playlist
 import com.sakura.music.data.model.PublicUser
+import com.sakura.music.data.room.TogetherOverview
 import com.sakura.music.ui.appContainer
 import com.sakura.music.ui.components.AccountAvatar
 import com.sakura.music.ui.components.ActionsSheet
@@ -56,6 +58,7 @@ import com.sakura.music.ui.components.SakuraCard
 import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.SheetAction
 import com.sakura.music.ui.components.SnackbarMessages
+import com.sakura.music.ui.components.TogetherSheet
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
 import com.sakura.music.ui.screens.library.LibraryActions
@@ -63,6 +66,7 @@ import com.sakura.music.ui.screens.library.LibraryTab
 import com.sakura.music.ui.screens.library.LibraryTabRow
 import com.sakura.music.ui.screens.library.LibraryViewModel
 import com.sakura.music.ui.screens.library.libraryTabContent
+import com.sakura.music.ui.util.formatTogetherDuration
 import kotlinx.coroutines.launch
 
 /**
@@ -88,12 +92,23 @@ fun AccountScreen(navigator: SakuraNavigator) {
     var deleting by remember { mutableStateOf<Playlist?>(null) }
     var clearingHistory by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<Playlist?>(null) }
+    var showTogether by remember { mutableStateOf(false) }
 
     val user = auth.user
     val current = library
 
+    // 一起听那一栏：在房间里时显示房间码与同伴，不在房间时显示累计总览。
+    val roomCode by container.roomSync.code.collectAsStateWithLifecycle()
+    val room by container.roomSync.room.collectAsStateWithLifecycle()
+    var overview by remember { mutableStateOf<TogetherOverview?>(null) }
+
     // 统计数字来自服务端：进这一页时刷新一次，收藏/歌单/历史是在别处改的。
     LaunchedEffect(Unit) { container.authRepository.refreshStats() }
+
+    // 一起听累计同理；进房/退房会让它变，所以房间码一变就重新拉一次。
+    LaunchedEffect(roomCode) {
+        overview = runCatching { container.api.roomOverview() }.getOrNull()
+    }
 
     val actions = LibraryActions(
         onPlay = { tracks, index -> container.playbackCenter.play(tracks, index) },
@@ -183,6 +198,17 @@ fun AccountScreen(navigator: SakuraNavigator) {
                                 StatCell("历史", auth.stats?.history, Modifier.weight(1f))
                             }
                         }
+                    }
+
+                    item(key = "together") {
+                        Spacer(Modifier.height(16.dp))
+                        TogetherCard(
+                            code = roomCode,
+                            // 按账号维度取对面那位：旁观时 `room.partner` 会指错人（见 RoomSync）。
+                            partnerName = container.roomSync.otherMember()?.nickname,
+                            overview = overview,
+                            onClick = { showTogether = true },
+                        )
                     }
                 }
 
@@ -285,6 +311,69 @@ fun AccountScreen(navigator: SakuraNavigator) {
                 ),
             ),
         )
+    }
+
+    if (showTogether) {
+        TogetherSheet(
+            onDismiss = { showTogether = false },
+            onMessage = viewModel::showMessage,
+        )
+    }
+}
+
+/**
+ * 「一起听」那一栏。
+ *
+ * 两种样子：不在房间里时是**入口 + 总览**（累计听了多久、和几个人一起听过）；
+ * 在房间里时变成**回房间的口子**（房间码、和谁在听）。所以这一栏本身就是「在不在房间」
+ * 最直接的一眼判断。
+ */
+@Composable
+private fun TogetherCard(
+    code: String?,
+    partnerName: String?,
+    overview: TogetherOverview?,
+    onClick: () -> Unit,
+) {
+    SakuraCard(
+        onClick = onClick,
+        modifier = Modifier.padding(horizontal = 16.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(
+                imageVector = Icons.Rounded.Groups,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(22.dp),
+            )
+            Spacer(Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "一起听", style = MaterialTheme.typography.titleSmall)
+                Spacer(Modifier.height(2.dp))
+                Text(
+                    text = when {
+                        // 对方还没进来时不报昵称（快照里也没有）。
+                        code != null && !partnerName.isNullOrBlank() ->
+                            "正在和 $partnerName 一起听 · 房间码 $code"
+
+                        code != null -> "房间码 $code，等好友加入"
+
+                        overview != null && overview.partnerCount > 0 ->
+                            "累计 ${formatTogetherDuration(overview.totalSeconds)} · " +
+                                "和 ${overview.partnerCount} 位好友一起听过"
+
+                        else -> "和朋友同步听同一首歌，任一方都能切歌、拖进度"
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                imageVector = Icons.Rounded.KeyboardArrowRight,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

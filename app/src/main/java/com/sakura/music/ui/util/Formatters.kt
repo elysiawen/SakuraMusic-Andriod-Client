@@ -85,6 +85,19 @@ fun formatTotalDuration(millis: Long): String {
     }
 }
 
+/**
+ * 一起听时长的人话写法：`38 秒` / `24 分 12 秒` / `3 小时 40 分`。
+ *
+ * 与 [formatDuration]（`mm:ss`，给进度条用）不同：这里的数字是要**读出来**的一句话。
+ * 也不直接用 [formatTotalDuration]——那个对 0 返回空串，而一起听刚开房时
+ * 「0 秒」是有意义的读数。
+ */
+fun formatTogetherDuration(seconds: Double): String {
+    val total = seconds.toLong().coerceAtLeast(0L)
+    if (total < 60) return "$total 秒"
+    return formatTotalDuration(total * 1000L).ifEmpty { "$total 秒" }
+}
+
 /** 数量文案：`12 首` / `1.2 万首`。 */
 fun formatCount(count: Int?): String {
     val value = count ?: return ""

@@ -4,9 +4,12 @@ import android.widget.Toast
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutHorizontally
@@ -15,12 +18,17 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.material.icons.rounded.LibraryMusic
@@ -234,6 +242,19 @@ fun SakuraRoot(container: AppContainer) {
         container.playbackCenter.consumeNotice()
     }
 
+    /**
+     * 一起听的一次性提示（房间被对方结束、操作失败…）。
+     *
+     * 也在这里统一弹：触发点可能在播放页的面板里，但「对方结束了一起听」这类消息
+     * 是**对面**的动作引起的，用户此刻没准已经收起播放器在看别的页面。
+     */
+    val roomNotice by container.roomSync.notice.collectAsStateWithLifecycle()
+    LaunchedEffect(roomNotice) {
+        val text = roomNotice ?: return@LaunchedEffect
+        Toast.makeText(context, text, Toast.LENGTH_LONG).show()
+        container.roomSync.consumeNotice()
+    }
+
     /** 播放器浮层开没开。开着的时候底下的页面还活着，收起就能看到它们。 */
     var playerOpen by rememberSaveable { mutableStateOf(false) }
 
@@ -380,20 +401,61 @@ private fun SakuraNavigation(
     val currentRoute = backStackEntry?.destination?.route ?: Routes.HOME
     val onMainDestination = currentRoute in Routes.mainDestinations
 
+    /*
+     * 底部那一组（迷你播放条 + 导航栏）脚下的空档。
+     *
+     * 它必须是动画出来的，不能在一帧里从「导航栏 + 手势区」换成「只剩手势区」——那正是
+     * 点进详情页时迷你条突然往下一沉（脚下一下子少了导航栏那 80dp）、退出来时又猛抬
+     * 回去的原因。现在导航栏连它自带的手势区一起收缩归零，这一层把同样的高度补上，
+     * 两边同一条时长与缓动，迷你条的净位移于是是连续的：整组像一块板子从屏幕下沿滑进滑出。
+     */
+    val bottomGap by animateDpAsState(
+        targetValue = if (onMainDestination) {
+            0.dp
+        } else {
+            WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+        },
+        animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+        label = "bottomGap",
+    )
+
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    // 一级页面下面紧跟着底部栏，系统手势区由导航栏自己让开；
-                    // 详情页没有导航栏，而且迷你播放条也可能因为没在播放而不出现，
-                    // 所以让这一层来让——否则没播歌时列表底部会压在系统栏下面。
-                    .then(if (onMainDestination) Modifier else Modifier.navigationBarsPadding()),
+                    // 详情页没有导航栏，而迷你播放条也可能因为没在播放而不出现，
+                    // 所以手势区得由这一层让开——否则没播歌时列表底部会压在系统栏下面。
+                    .padding(bottom = bottomGap)
+                    // 横屏时系统导航栏可能在侧边，那一条和上面的底边空档无关：一级页面由
+                    // 导航栏自己让（它铺满整行），其余时候由这一层让。只让左右，免得和底部栏
+                    // 自己那份底部 insets（它还要靠它把手势区刷成导航栏底色）叠成两份。
+                    .then(
+                        if (onMainDestination) {
+                            Modifier
+                        } else {
+                            Modifier.windowInsetsPadding(
+                                WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal),
+                            )
+                        },
+                    ),
             ) {
                 MiniPlayerBar(controller = controller, onOpen = onOpenPlayer)
 
-                if (onMainDestination) {
+                AnimatedVisibility(
+                    visible = onMainDestination,
+                    // 顶部对齐地长 / 缩：内容的下沿跟着容器一起动，看着才是导航栏整条从下沿
+                    // 滑进滑出，而不是在原地被压扁。容器顶端就是迷你条的下沿，两者同进同退。
+                    enter = expandVertically(
+                        expandFrom = Alignment.Top,
+                        animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+                    ),
+                    exit = shrinkVertically(
+                        shrinkTowards = Alignment.Top,
+                        animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+                    ),
+                ) {
                     SakuraBottomBar(
                         currentRoute = currentRoute,
                         onSelect = { route ->

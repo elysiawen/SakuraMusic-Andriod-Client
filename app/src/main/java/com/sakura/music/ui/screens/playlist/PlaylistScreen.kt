@@ -101,7 +101,7 @@ fun PlaylistScreen(
             label = "自建歌单",
             stats = trackListStats(tracks),
             description = playlist?.description?.takeIf { it.isNotBlank() } ?: PlaylistHint,
-            onPlayAll = { container.playbackCenter.play(tracks, 0) },
+            onPlayAll = { container.playbackCenter.playAll(tracks) },
             playAllEnabled = tracks.isNotEmpty(),
         ),
         absent = {

@@ -50,6 +50,13 @@ data class PlaybackState(
     /** 音量（0~1），同样由主线程轮询维护。 */
     val volume: Float = 1f,
     val error: String? = null,
+    /**
+     * 「这一首**确定播不了**」时的曲目 key（无音源 / 版权或会员限制 / 格式坏了 / 源 404）。
+     *
+     * 与 [error] 分开是因为它们的用途不同：[error] 是给用户看的整屏错误卡，
+     * 这个是给「一起听」的判据——只有确定性播不了才该把整首歌跳掉，网络抖动不能。
+     */
+    val unplayableKey: String? = null,
     /** 当前曲目只能听到试听片段（受版权或会员限制）。 */
     val trial: Boolean = false,
     /** true = 直连平台 CDN，false = 字节经网关转发。这是**预先**判断的结果。 */
@@ -77,6 +84,26 @@ data class PlaybackState(
     val current: UnifiedTrack? get() = queue.getOrNull(index)
 
     val hasLyrics: Boolean get() = lyric.isNotEmpty()
+}
+
+/**
+ * 房间接管时的「播放意图」转交口。
+ *
+ * 「点一首歌」的入口散在七八个页面里（搜索、歌单、专辑、发现、收藏…），全都在调
+ * [PlaybackCenter.play]；一个个改过去既容易漏、两条路也会慢慢长歪。在这里转一次，
+ * 语义就和网页端的 `useTransport` 对齐了：**房间里点歌 = 点歌**（`playNow`，
+ * 不在共享队列里就加进去再播），**播放整张列表 = 换歌单**（`setQueue`）。
+ *
+ * 由容器在装配时接上（实现见 `RoomSync`）。没接上、或本机不在房间里时返回 false，
+ * 一切照旧走本地播放器。
+ */
+interface RoomPlaybackBridge {
+
+    /** 点一首歌。返回 true 表示已交给房间，调用方不要再动本地播放器。 */
+    fun onPlayTrack(track: UnifiedTrack): Boolean
+
+    /** 播放一整个列表（「播放全部」）。 */
+    fun onReplaceQueue(tracks: List<UnifiedTrack>, startIndex: Int): Boolean
 }
 
 /**
@@ -138,6 +165,15 @@ class PlaybackCenter(
     private val _seeks = MutableSharedFlow<Unit>(extraBufferCapacity = 4)
     val seeks: SharedFlow<Unit> = _seeks.asSharedFlow()
 
+    /**
+     * 一首歌**自然播完**（不是用户切歌、也不是被换掉）的事件，带的是刚播完那首的 key。
+     *
+     * 「一起听」靠它上报 `ended`，由服务端统一决定下一首——本机不自行切歌，
+     * 否则两端会各切一次，队列立刻错位。
+     */
+    private val _ended = MutableSharedFlow<String>(extraBufferCapacity = 4)
+    val ended: SharedFlow<String> = _ended.asSharedFlow()
+
     fun consumeNotice() {
         _notice.value = null
     }
@@ -146,6 +182,33 @@ class PlaybackCenter(
     private var quality: Quality = Quality.Default
     private var preferredPlatform: Platform? = null
     private var pollJob: Job? = null
+
+    /**
+     * 暂停落盘（一起听接管期间）。
+     *
+     * 房间把播放器的队列换成了共享队列，这时候要是还往「个人现场」里写，
+     * 退房之后恢复出来的就是房间的歌——用户自己的那份现场被永久盖掉了。
+     */
+    private var persistencePaused = false
+
+    /** 房间接管期间：播放顺序（循环 / 随机）由房间决定，用户设置暂时让位。 */
+    private var roomPlayMode = false
+
+    /**
+     * 房间接管时的播放意图转交口，见 [RoomPlaybackBridge]。
+     *
+     * 用可写字段而不是构造参数：转交口的实现（`RoomSync`）本身要依赖播放器，
+     * 构造期注入会变成环；反正只有容器会在一处接上它。
+     */
+    var roomBridge: RoomPlaybackBridge? = null
+
+    /**
+     * 上一次同步到的当前曲目 key。
+     *
+     * 只在为了回答一个问题：自动切歌时「刚播完的是哪一首」。Media3 的
+     * `onMediaItemTransition` 给的是**新**曲目，而一起听要上报的正是结束的那一首。
+     */
+    private var lastKey: String? = null
 
     /**
      * 已经提示过的降级组合（`请求档位>实际档位`）。
@@ -236,9 +299,15 @@ class PlaybackCenter(
 
     private val listener = object : Player.Listener {
         override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+            val finished = lastKey
             syncQueue()
             syncFlags()
             onTrackChanged()
+            // 自动切歌 = 上一首放完了：把**刚结束的那一首**报出去（新曲目 Media3 已经切好了）。
+            if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                val now = _state.value.current?.key
+                if (finished != null && finished != now) _ended.tryEmit(finished)
+            }
             // 换歌就落盘：哪怕下一秒进程被杀，下次进来的也是这一首。
             persistSession()
         }
@@ -255,11 +324,22 @@ class PlaybackCenter(
 
         override fun onPlaybackStateChanged(playbackState: Int) {
             _state.update { it.copy(isBuffering = playbackState == Player.STATE_BUFFERING) }
+            // 队尾播完（循环关闭时才会出现）：同样算「这首结束了」。
+            if (playbackState == Player.STATE_ENDED) {
+                _state.value.current?.key?.let { _ended.tryEmit(it) }
+            }
             syncFlags()
         }
 
         override fun onPlayerError(error: PlaybackException) {
-            _state.update { it.copy(error = describePlaybackError(error), isBuffering = false) }
+            _state.update {
+                it.copy(
+                    error = describePlaybackError(error),
+                    isBuffering = false,
+                    // 只有「确定性播不了」才标记：网络抖动不该让整首歌被跳过。
+                    unplayableKey = it.current?.key?.takeIf { _ -> isUnplayableFailure(error) },
+                )
+            }
         }
     }
 
@@ -321,6 +401,8 @@ class PlaybackCenter(
         }
         val index = active.currentMediaItemIndex.takeIf { it in tracks.indices } ?: -1
         _state.update { it.copy(queue = tracks, index = index) }
+        // 记下这一帧的曲目，下一次自动切歌时就知道"刚播完的是哪一首"。
+        lastKey = _state.value.current?.key
     }
 
     /** 换歌：清掉上一首的错误与试听标记，重新取歌词、记一次播放、解析一次地址。 */
@@ -334,6 +416,8 @@ class PlaybackCenter(
         _state.update {
             it.copy(
                 error = null,
+                // 换歌了：上一首"播不了"的结论不能留给下一首，否则它会被无端跳过。
+                unplayableKey = null,
                 trial = false,
                 // 上一首的档位结论不能留给下一首：解析出来之前谁也不知道新的一首会降到哪。
                 actualQuality = null,
@@ -405,7 +489,39 @@ class PlaybackCenter(
     }
 
     /**
-     * 播放一个列表。
+     * 播放一个列表（界面上的「点这首」）。
+     *
+     * 房间里这份意图是**点给房间的**：本地先响起来，200 毫秒后就会被镜像装回房间那一份，
+     * 表现成「点了没反应」。所以先问一次转交口。
+     */
+    fun play(
+        tracks: List<UnifiedTrack>,
+        startIndex: Int = 0,
+        startPositionMs: Long = 0L,
+    ) {
+        if (tracks.isEmpty()) return
+        val track = tracks.getOrNull(startIndex.coerceIn(0, tracks.lastIndex))
+        if (track != null && roomBridge?.onPlayTrack(track) == true) return
+        playDirect(tracks, startIndex, startPositionMs)
+    }
+
+    /**
+     * 播放整张列表（界面上的「播放全部」）。
+     *
+     * 与 [play] 的差别只体现在房间里：那边是「点这首」（`playNow`），这边是「换歌单」
+     * （`setQueue`）——把所有列表都按「点这首」处理会让人以为点了播放全部，结果只放了一首。
+     */
+    fun playAll(tracks: List<UnifiedTrack>, startIndex: Int = 0) {
+        if (tracks.isEmpty()) return
+        if (roomBridge?.onReplaceQueue(tracks, startIndex) == true) return
+        playDirect(tracks, startIndex, 0L)
+    }
+
+    /**
+     * 直接驱动本地播放器，**不经过房间转交口**。
+     *
+     * 房间镜像、设备接管 / 跟随、退房恢复现场都必须走这里：它们本来就是「把队列装进播放器」
+     * 这件事本身，再过一次转交口就会自己调自己。
      *
      * [startIndex] 是列表里该从哪一首开始，[startPositionMs] 是从那一首的第几毫秒开始。
      *
@@ -413,7 +529,7 @@ class PlaybackCenter(
      * `seekTo`：两者都是跨进程的异步命令，`seekTo` 会落在**尚未被替换的旧队列**上，
      * 随后新队列一装载就把位置清成 0——接管过来的进度就是这么丢的。
      */
-    fun play(
+    fun playDirect(
         tracks: List<UnifiedTrack>,
         startIndex: Int = 0,
         startPositionMs: Long = 0L,
@@ -437,6 +553,7 @@ class PlaybackCenter(
 
     /** 单曲播放：队列里没有就把它换成队列。 */
     fun playSingle(track: UnifiedTrack) {
+        if (roomBridge?.onPlayTrack(track) == true) return
         val current = _state.value.queue.map { it.key }
         val index = current.indexOf(track.key)
         if (index >= 0) {
@@ -516,6 +633,8 @@ class PlaybackCenter(
      *   `apply` 是异步落盘，那种情况下有丢的可能。
      */
     fun persistSession(synchronous: Boolean = false) {
+        // 一起听接管期间不落盘：这时候队列是共享队列，写进去会盖掉用户自己的现场。
+        if (persistencePaused) return
         mainScope.launch {
             val current = _state.value
             if (current.queue.isEmpty()) {
@@ -537,6 +656,36 @@ class PlaybackCenter(
                 ),
                 synchronous = synchronous,
             )
+        }
+    }
+
+    /**
+     * 暂停 / 恢复「个人现场」的落盘。一起听入房时暂停、退房时恢复。
+     */
+    fun setPersistencePaused(paused: Boolean) {
+        persistencePaused = paused
+    }
+
+    /** 落盘的那一份个人现场（冷启动时内存里还没有队列，靠它把用户自己的队列找回来）。 */
+    fun loadPersistedSession(): PlaybackSession? = sessionStore.load()
+
+    /**
+     * 房间接管期间的播放模式：顺序、不随机、不循环。
+     *
+     * 房间是权威，切歌由服务端统一决定。本机要是还开着列表循环或单曲循环，播完一首它
+     * 自己就跳走了，而服务端的 `ended` 还没回来——两边各切一次，队列立刻错位。
+     * 退房时把用户自己的播放模式还回去（[applyPlayMode]）。
+     */
+    fun setRoomPlayMode(enabled: Boolean) {
+        roomPlayMode = enabled
+        mainScope.launch {
+            val active = controller ?: return@launch
+            if (enabled) {
+                active.repeatMode = Player.REPEAT_MODE_OFF
+                active.shuffleModeEnabled = false
+            } else {
+                applyPlayMode(_playMode.value)
+            }
         }
     }
 
@@ -663,6 +812,9 @@ class PlaybackCenter(
 
     private fun applyPlayMode(mode: PlayMode) {
         val active = controller ?: return
+        // 房间接管期间由房间决定顺序：设置页 / 播放页改了播放模式也不许动播放器，
+        // 否则列表循环或单曲循环会在播完一首时抢在服务端之前切歌。
+        if (roomPlayMode) return
         when (mode) {
             PlayMode.Order -> {
                 active.repeatMode = Player.REPEAT_MODE_OFF

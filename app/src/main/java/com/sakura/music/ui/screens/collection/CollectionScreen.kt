@@ -76,7 +76,7 @@ fun CollectionScreen(
             label = "${kind.label} · ${platform.label}",
             stats = trackListStats(tracks),
             description = detail?.description,
-            onPlayAll = { container.playbackCenter.play(tracks, 0) },
+            onPlayAll = { container.playbackCenter.playAll(tracks) },
             playAllEnabled = tracks.isNotEmpty(),
         ),
         // 一首都没取到：整页换成它（头部也不再显示）。

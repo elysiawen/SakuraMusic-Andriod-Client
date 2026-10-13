@@ -85,7 +85,7 @@ fun ArtistScreen(
                 detail?.artist?.songCount?.let { InfoPill("$it 首歌曲") }
                 detail?.artist?.albumCount?.let { InfoPill("$it 张专辑") }
             },
-            onPlayAll = { container.playbackCenter.play(tracks, 0) },
+            onPlayAll = { container.playbackCenter.playAll(tracks) },
             playAllEnabled = tracks.isNotEmpty(),
             // 经典版式里头像用圆形。
             circularCover = true,

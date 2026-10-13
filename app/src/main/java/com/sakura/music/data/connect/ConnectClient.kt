@@ -12,6 +12,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.sakura.music.data.remote.ApiException
+import com.sakura.music.data.room.RoomEnvelope
+import com.sakura.music.data.room.RoomPlayback
+import com.sakura.music.data.room.RoomStreamEvent
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -43,6 +46,12 @@ class ConnectClient(
 
     val deviceId: String get() = identity.id
 
+    /** 设备展示名（机型）。入房时作为成员名上报。 */
+    val deviceName: String get() = identity.name
+
+    /** 设备形态，协议里只认 `android` / `windows`，其余一律当 `web`。 */
+    val deviceKind: String get() = identity.kind
+
     private val _devices = MutableStateFlow<List<DeviceView>>(emptyList())
     val devices: StateFlow<List<DeviceView>> = _devices.asStateFlow()
 
@@ -65,6 +74,15 @@ class ConnectClient(
     /** 收到的控制指令。播放器那边订阅它来执行。 */
     private val _commands = MutableSharedFlow<CommandEvent>(extraBufferCapacity = 16)
     val commands: SharedFlow<CommandEvent> = _commands.asSharedFlow()
+
+    /**
+     * 「一起听」房间事件。
+     *
+     * 房间**不另开一条连接**：`room` 与 `room-playback` 就和设备列表走同一条 SSE。
+     * 这里只把帧解出来转发，房间的语义（镜像播放、时长推演）全在 `RoomSync` 里。
+     */
+    private val _roomEvents = MutableSharedFlow<RoomStreamEvent>(extraBufferCapacity = 32)
+    val roomEvents: SharedFlow<RoomStreamEvent> = _roomEvents.asSharedFlow()
 
     /**
      * SSE 用的 client。
@@ -192,6 +210,8 @@ class ConnectClient(
                     .onSuccess {
                         syncClock(it.serverNow)
                         _devices.value = it.devices
+                        // 重连：房间那边要凭它补一次入房（冷启动、网关重启后都靠这一步）。
+                        _roomEvents.tryEmit(RoomStreamEvent.Reconnected)
                     }
 
                 "devices" -> runCatching { json.decodeFromString(DevicesEvent.serializer(), data) }
@@ -204,6 +224,19 @@ class ConnectClient(
                     .onSuccess {
                         // 在播放线程之外执行：这里只是把指令转交给订阅者。
                         _commands.tryEmit(it)
+                    }
+
+                // 房间全量快照：`room` 为 null 表示房间没了（对方结束 / 网关重启）。
+                "room" -> runCatching { json.decodeFromString(RoomEnvelope.serializer(), data) }
+                    .onSuccess {
+                        syncClock(it.serverNow)
+                        _roomEvents.tryEmit(RoomStreamEvent.Snapshot(it))
+                    }
+
+                "room-playback" -> runCatching { json.decodeFromString(RoomPlayback.serializer(), data) }
+                    .onSuccess {
+                        syncClock(it.serverNow)
+                        _roomEvents.tryEmit(RoomStreamEvent.Playback(it, it.serverNow))
                     }
             }
         }
