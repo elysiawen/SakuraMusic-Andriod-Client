@@ -18,11 +18,9 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Edit
-import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -47,7 +45,6 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sakura.music.data.model.Playlist
 import com.sakura.music.data.model.PublicUser
-import com.sakura.music.data.room.TogetherOverview
 import com.sakura.music.ui.appContainer
 import com.sakura.music.ui.components.AccountAvatar
 import com.sakura.music.ui.components.ActionsSheet
@@ -59,10 +56,6 @@ import com.sakura.music.ui.components.SakuraCard
 import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.SheetAction
 import com.sakura.music.ui.components.SnackbarMessages
-import com.sakura.music.ui.components.TogetherSheet
-import com.sakura.music.ui.components.TogetherStats
-import com.sakura.music.ui.components.rememberTogetherOverview
-import com.sakura.music.ui.components.rememberTogetherSubtitle
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
 import com.sakura.music.ui.screens.library.LibraryActions
@@ -95,14 +88,9 @@ fun AccountScreen(navigator: SakuraNavigator) {
     var deleting by remember { mutableStateOf<Playlist?>(null) }
     var clearingHistory by remember { mutableStateOf(false) }
     var actionsFor by remember { mutableStateOf<Playlist?>(null) }
-    var showTogether by remember { mutableStateOf(false) }
 
     val user = auth.user
     val current = library
-
-    // 一起听那一栏（说明行 + 累计读数），与账户中心那一栏是同一份。
-    val togetherSubtitle = rememberTogetherSubtitle()
-    val overview = rememberTogetherOverview()
 
     // 统计数字来自服务端：进这一页时刷新一次，收藏/歌单/历史是在别处改的。
     LaunchedEffect(Unit) { container.authRepository.refreshStats() }
@@ -197,14 +185,6 @@ fun AccountScreen(navigator: SakuraNavigator) {
                         }
                     }
 
-                    item(key = "together") {
-                        Spacer(Modifier.height(16.dp))
-                        TogetherCard(
-                            subtitle = togetherSubtitle,
-                            overview = overview,
-                            onClick = { showTogether = true },
-                        )
-                    }
                 }
 
                 item(key = "library-gap") { Spacer(Modifier.height(16.dp)) }
@@ -308,63 +288,6 @@ fun AccountScreen(navigator: SakuraNavigator) {
         )
     }
 
-    if (showTogether) {
-        TogetherSheet(
-            onDismiss = { showTogether = false },
-            onMessage = viewModel::showMessage,
-        )
-    }
-}
-
-/**
- * 「一起听」那一栏。
- *
- * 上面一行是入口（整块可点，打开一起听面板），下面三格是**累计读数**——与账户中心那一栏
- * 是同一组数字。说明行由 [rememberTogetherSubtitle] 给：在房间里它会变成「和谁、房间码多少」
- * 或「放音在哪台设备上」，于是这一栏本身也是「在不在房间」最直接的一眼判断。
- */
-@Composable
-private fun TogetherCard(
-    subtitle: String,
-    overview: TogetherOverview?,
-    onClick: () -> Unit,
-) {
-    SakuraCard(
-        onClick = onClick,
-        modifier = Modifier.padding(horizontal = 16.dp),
-    ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = Icons.Rounded.Groups,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(22.dp),
-            )
-            Spacer(Modifier.width(12.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Text(text = "一起听", style = MaterialTheme.typography.titleSmall)
-                Spacer(Modifier.height(2.dp))
-                Text(
-                    text = subtitle,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-            Icon(
-                imageVector = Icons.Rounded.KeyboardArrowRight,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-
-        Spacer(Modifier.height(12.dp))
-        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-        TogetherStats(
-            overview = overview,
-            // 分隔线之上是入口、之下是读数：留出同样的 12dp，两块才不像挤在一起。
-            modifier = Modifier.padding(top = 12.dp),
-        )
-    }
 }
 
 /** 身份那一栏：整块可点，点进账户资料。 */

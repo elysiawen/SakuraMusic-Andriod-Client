@@ -5,6 +5,7 @@ import com.sakura.music.data.model.AddTrackResponse
 import com.sakura.music.data.model.AlbumDetail
 import com.sakura.music.data.model.ArtistDetail
 import com.sakura.music.data.model.CollectionDetail
+import com.sakura.music.data.model.CredentialListResponse
 import com.sakura.music.data.model.DiscoverFeed
 import com.sakura.music.data.model.DiscoverKind
 import com.sakura.music.data.model.DiscoverSection
@@ -37,6 +38,7 @@ import com.sakura.music.data.room.JoinRoomBody
 import com.sakura.music.data.room.RoomCodeResponse
 import com.sakura.music.data.room.RoomPreview
 import com.sakura.music.data.room.TogetherOverview
+import com.sakura.music.data.room.TogetherPartnerDetail
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -49,8 +51,9 @@ import kotlinx.serialization.json.put
 /**
  * 网关的 40 个端点里，Android 端用得到的那些。
  *
- * 扫码绑定（`/api/bind` 与 `/api/credentials` 两组接口）刻意没有实现：那套流程请走网页端或
- * 桌面端；[com.sakura.music.data.session.LocalCredentialStore] 仍然会在请求上带上
+ * 扫码绑定那一组接口（`/api/bind` 与写操作的 `/api/credentials`）刻意没有实现：那套流程请走
+ * 网页端或桌面端。只读的凭据列表（[serverCredentials]）是实现的——账户中心要展示
+ * 「绑定了什么」。[com.sakura.music.data.session.LocalCredentialStore] 仍然会在请求上带上
  * 本机凭据，所以「在别处绑成本机模式」的用户在这里照样能用。
  */
 class SakuraApi(
@@ -100,6 +103,14 @@ class SakuraApi(
 
     suspend fun platforms(): PlatformListResponse =
         client.request("GET", "/api/platforms", PlatformListResponse.serializer())
+
+    /**
+     * 服务端加密保存的第三方凭据列表（账户中心展示「绑定了什么」）。
+     *
+     * 「仅本机」模式的凭据不在其中——那份只在绑定它的那台设备上，别处看不到。
+     */
+    suspend fun serverCredentials(): CredentialListResponse =
+        client.request("GET", "/api/credentials", CredentialListResponse.serializer())
 
     /* ------------------------------ 账户 ------------------------------ */
 
@@ -478,6 +489,14 @@ class SakuraApi(
     /** 我的一起听总览（账户中心用）。 */
     suspend fun roomOverview(): TogetherOverview =
         client.request("GET", "/api/rooms/overview", TogetherOverview.serializer())
+
+    /** 某位伙伴的详细一起听记录（账户中心的伙伴明细用）。 */
+    suspend fun roomPartnerDetail(partnerId: String): TogetherPartnerDetail =
+        client.request(
+            method = "GET",
+            path = "/api/rooms/overview/${encode(partnerId)}",
+            deserializer = TogetherPartnerDetail.serializer(),
+        )
 
     /* ------------------------------ 工具 ------------------------------ */
 

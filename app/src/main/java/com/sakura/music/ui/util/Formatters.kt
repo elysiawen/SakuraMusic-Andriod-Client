@@ -1,5 +1,6 @@
 package com.sakura.music.ui.util
 
+import com.sakura.music.data.model.Platform
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneId
@@ -97,6 +98,59 @@ fun formatTogetherDuration(seconds: Double): String {
     if (total < 60) return "$total 秒"
     return formatTotalDuration(total * 1000L).ifEmpty { "$total 秒" }
 }
+
+/**
+ * 一起听明细里的时间点：日期 + 时刻。
+ *
+ * 与 [formatPlayedAt]（「3 分钟前」）不同：翻明细时要的是**具体哪天**，
+ * 相对时间反而看不出先后。同一年不写年份，跨年的才带上——明细里绝大多数都是今年的。
+ */
+fun formatSessionTime(iso: String): String {
+    val instant = runCatching { Instant.parse(iso) }.getOrNull() ?: return ""
+    val zone = ZoneId.systemDefault()
+    val then = instant.atZone(zone)
+    val sameYear = then.year == Instant.now().atZone(zone).year
+    val date = String.format(Locale.US, "%02d-%02d", then.monthValue, then.dayOfMonth)
+    val time = String.format(Locale.US, "%02d:%02d", then.hour, then.minute)
+    val year = if (sameYear) "" else "${then.year}-"
+    return "$year$date $time"
+}
+
+/**
+ * 会员档位标识 → 界面文案。
+ *
+ * 网关发的 `vipLabel` 是**上游字段名**（ASCII、不本地化，接口里不放展示文案），
+ * 中文只出现在这里——要改叫法、要出多语言版本，都只动这张表：
+ *   QQ 音乐  `vip` → 绿钻、`svip` → 豪华绿钻、`huge_vip` → 超级会员
+ *
+ * **QQ 那三行看着别扭，但别「顺手修」**：QQ 的字段名与产品名是反的——`huge_vip`
+ * （名字像"豪华"）实际是**超级会员**，`svip` 才是**豪华绿钻**。拿真实账号核对过
+ * （`huge_vip_end` 与超级会员到期日、`eight_end` 与豪华绿钻到期日一一对上），
+ * 原因与证据写在 `gateway/src/upstream/qq.ts` 那段注释里。
+ *
+ * **网易云不看标识**：上游给不出可靠的档位（`redVipLevel` 是「红VIP等级」不是档位、
+ * 产品编码 `vipCode` 又没有官方枚举表），网关目前干脆不发 `vipLabel`——既然只知道
+ * 「是不是会员」，就统一显示 `VIP`，不假装知道哪一档。依据见
+ * `gateway/src/upstream/netease.ts` 与 `docs/API.md`。
+ *
+ * QQ 侧认不出的标识、以及旧数据里没有标识的，退到通用的「会员」——「是会员但不知道哪一档」，
+ * 比空着或者干脆不显示都准。
+ */
+fun formatVipLabel(platform: Platform, vipLabel: String?): String = when (platform) {
+    // 有档位可查：标识 → 档位名。
+    Platform.QQ -> QQ_VIP_LABELS[vipLabel] ?: "会员"
+
+    // 网易云只有「是不是会员」这一件事可说（网关眼下也不发标识），一律 VIP。
+    Platform.NETEASE -> "VIP"
+
+    else -> "会员"
+}
+
+private val QQ_VIP_LABELS = mapOf(
+    "vip" to "绿钻",
+    "svip" to "豪华绿钻",
+    "huge_vip" to "超级会员",
+)
 
 /** 数量文案：`12 首` / `1.2 万首`。 */
 fun formatCount(count: Int?): String {

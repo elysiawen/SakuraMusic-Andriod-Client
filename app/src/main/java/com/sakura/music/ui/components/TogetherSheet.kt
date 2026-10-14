@@ -690,54 +690,6 @@ private fun togetherText(seconds: Double): String = formatTogetherDuration(secon
 /* ------------------------------ 账户页那一栏 ------------------------------ */
 
 /**
- * 一起听总览：累计时长、一起听过的伙伴、次数（[TogetherStats] 用）。
- *
- * 进房 / 退房会改变它，所以房间码一变就重新拉一次；账户页有两处要它
- * （账号页的入口卡片、账户资料页的「一起听」一节），逻辑只有一份，别各写一套。
- *
- * 刻意吞掉失败（拿不到就是 null）：它是账户页顺带展示的读数，为它弹一次错误没有意义，
- * 界面按「还没读到」显示 `--`。
- */
-@Composable
-fun rememberTogetherOverview(): TogetherOverview? {
-    val container = appContainer()
-    val roomCode by container.roomSync.code.collectAsStateWithLifecycle()
-    var overview by remember { mutableStateOf<TogetherOverview?>(null) }
-    LaunchedEffect(roomCode) {
-        overview = runCatching { container.api.roomOverview() }.getOrNull()
-    }
-    return overview
-}
-
-/**
- * 一起听那一栏的说明行。
- *
- * 在房间里要说清「和谁、房间码多少」「放音在哪台设备上」，不在房间里就说这一栏是干什么的。
- * 账户页两处（账号页、账户中心）共用，省得两处各写一套 `when`、改一处漏一处。
- */
-@Composable
-fun rememberTogetherSubtitle(): String {
-    val container = appContainer()
-    val roomCode by container.roomSync.code.collectAsStateWithLifecycle()
-    // 读一次快照：`otherMember()` / `seatDeviceName()` 读的是普通流，不订阅就不会重组。
-    val room by container.roomSync.room.collectAsStateWithLifecycle()
-    val spectating by container.roomSync.spectating.collectAsStateWithLifecycle()
-
-    val partner = room?.let { container.roomSync.otherMember()?.nickname }
-    return when {
-        roomCode == null -> "和朋友同步听同一首歌，任一方都能切歌、拖进度"
-
-        // 旁观：播放不在本机，把「在哪台」写出来，免得用户以为一起听坏了。
-        spectating ->
-            "正在「${container.roomSync.seatDeviceName() ?: "你的另一台设备"}」上播放 · 房间码 $roomCode"
-
-        !partner.isNullOrBlank() -> "正在和 $partner 一起听 · 房间码 $roomCode"
-
-        else -> "房间码 $roomCode，等好友加入"
-    }
-}
-
-/**
  * 一起听的三项读数：累计时长 / 一起听过的伙伴 / 一起听次数。
  *
  * 与网页端账户中心是同一套数字。前两项来自可靠的累计表；**次数来自明细表**——

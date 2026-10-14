@@ -61,10 +61,6 @@ class AccountViewModel(
         }
     }
 
-    fun refreshStats() {
-        viewModelScope.launch { auth.refreshStats() }
-    }
-
     fun logout() {
         viewModelScope.launch { auth.logout() }
     }

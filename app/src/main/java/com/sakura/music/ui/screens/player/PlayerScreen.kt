@@ -268,23 +268,6 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
         if (seatHere) container.roomSync.next() else container.playbackCenter.next()
     }
 
-    /**
-     * 把一起听的播放从同账号的另一台设备接到本机。
-     *
-     * 就是 `join`：服务端「一个账号只占一个席位」，join 的语义本来就是接席位；
-     * 对面会收到「席位已被接走」，降级为旁观——那台设备上房间照旧显示着，随时能再转移回去。
-     */
-    var transferring by remember { mutableStateOf(false) }
-    fun transferHere() {
-        val target = roomCode ?: return
-        if (transferring) return
-        transferring = true
-        scope.launch {
-            container.roomSync.join(target)
-            transferring = false
-        }
-    }
-
     // 错误卡片退场时 content 里已经读不到错误了，留一份最后的内容给它放完动画。
     var lastError by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(state.error) {
@@ -595,25 +578,6 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                             onClick = { showTogether = true },
                             modifier = Modifier.align(Alignment.BottomCenter),
                         )
-                    }
-                }
-
-                /*
-                 * 播放不在这台设备上：把「转移过来」直接摆在这一页。
-                 *
-                 * 面板里当然也有，但用户大概率是先在播放页发现「歌在别处响」的——
-                 * 让他还要先点开面板找一遍，不如就在这条提示下面给一个按钮。
-                 */
-                if (inRoom && spectating) {
-                    Spacer(Modifier.height(10.dp))
-                    FilledTonalButton(onClick = ::transferHere, enabled = !transferring) {
-                        Icon(
-                            imageVector = Icons.Rounded.SwapHoriz,
-                            contentDescription = null,
-                            modifier = Modifier.size(17.dp),
-                        )
-                        Spacer(Modifier.width(8.dp))
-                        Text(text = if (transferring) "转移中…" else "把播放转移到本机")
                     }
                 }
 

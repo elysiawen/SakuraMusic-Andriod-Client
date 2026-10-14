@@ -15,9 +15,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Logout
-import androidx.compose.material.icons.rounded.QrCode
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -30,7 +28,9 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -42,32 +42,33 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.PublicUser
+import com.sakura.music.data.model.ServerCredentialItem
 import com.sakura.music.ui.appContainer
 import com.sakura.music.ui.components.AccountAvatar
 import com.sakura.music.ui.components.ConfirmDialog
 import com.sakura.music.ui.components.ContentTopPadding
-import com.sakura.music.ui.components.InfoNotice
 import com.sakura.music.ui.components.ListBottomPadding
-import com.sakura.music.ui.components.NoticeTone
 import com.sakura.music.ui.components.SakuraCard
 import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.SectionHeader
 import com.sakura.music.ui.components.SettingRow
 import com.sakura.music.ui.components.SnackbarMessages
-import com.sakura.music.ui.components.TogetherSheet
-import com.sakura.music.ui.components.TogetherStats
-import com.sakura.music.ui.components.rememberTogetherOverview
-import com.sakura.music.ui.components.rememberTogetherSubtitle
+import com.sakura.music.ui.components.TogetherOverviewPanel
+import com.sakura.music.ui.components.TogetherPartnerDialog
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
+import com.sakura.music.ui.util.formatPlayedAt
+import com.sakura.music.ui.util.formatVipLabel
 
 /**
  * 账户中心：账号资料。
  *
  * 从账号页的头像那一栏进来，装的是「会改到账号本身」的东西：昵称与头像、密码、
- * 第三方账号绑定情况、退出登录，最后是**一起听**那一栏（房间入口 + 累计读数，
- * 与网页端账户中心同一栏、同样排在最后）。外观与播放偏好不在这里——那些在设置页。
+ * 退出登录；中间**只读**展示第三方账号绑定了什么（绑定流程只在网页端 / 桌面端），
+ * 最后是**一起听**的统计面板（读数 + 伙伴列表，与网页端账户中心同一栏、同样排在最后）。
+ * 外观与播放偏好不在这里——那些在设置页。
  */
 @Composable
 fun AccountDetailScreen(navigator: SakuraNavigator) {
@@ -80,11 +81,8 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
     var editingProfile by remember { mutableStateOf(false) }
     var changingPassword by remember { mutableStateOf(false) }
     var loggingOut by remember { mutableStateOf(false) }
-    var showTogether by remember { mutableStateOf(false) }
-
-    // 一起听那一栏：说明行（在不在房间、放音在哪台）与累计读数，与账号页那一栏同一份。
-    val togetherSubtitle = rememberTogetherSubtitle()
-    val togetherOverview = rememberTogetherOverview()
+    // 点开统计面板里某位伙伴时，记住是哪一位（userId → 昵称）；null = 关着。
+    var partnerFor by remember { mutableStateOf<Pair<String, String>?>(null) }
 
     val user = auth.user
     val current = state
@@ -137,24 +135,16 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
                             subtitle = "修改后所有设备都会退出登录",
                             onClick = { changingPassword = true },
                         )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        SettingRow(
-                            title = "刷新统计",
-                            subtitle = "重新拉取收藏、歌单与历史的数量",
-                            onClick = viewModel::refreshStats,
-                        )
                     }
 
+                    /*
+                     * 第三方账号：**只读展示**绑定了什么。绑定 / 解绑（扫码那一套）只在
+                     * 网页端与桌面端提供，这里不重复一套入口，只把结果摆出来。
+                     */
                     Spacer(Modifier.height(22.dp))
                     SectionHeader("第三方账号", modifier = Modifier.padding(start = 22.dp))
-                    Box(modifier = Modifier.padding(horizontal = 16.dp)) {
-                        InfoNotice(
-                            icon = Icons.Rounded.QrCode,
-                            title = "扫码绑定请在网页端或桌面端完成",
-                            message = "Android 端暂不提供二维码绑定。绑定时选择「存到服务器」的话，" +
-                                "这台设备什么都不用配；选择「仅本机」的凭据只留在绑定它的那台设备上。",
-                            tone = NoticeTone.Accent,
-                        )
+                    SakuraCard(modifier = Modifier.padding(horizontal = 16.dp)) {
+                        ThirdPartyAccounts()
                     }
 
                     Spacer(Modifier.height(22.dp))
@@ -177,29 +167,17 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
 
                     /*
                      * 一起听排在最末：它是「你和另一个人的事」，与上面那些「这个账号本身」的
-                     * 东西不同类，放最后既不打断账号资料的连贯，也顺手给了一个入口。
-                     * 与网页端账户中心同一栏、同样在最后（那边是从这个位置挪过去的）。
+                     * 东西不同类，放最后既不打断账号资料的连贯。
+                     * 这里只放统计面板（与网页端账户中心同一栏）：读数 + 伙伴列表，
+                     * 房间入口在播放条上（见 TogetherSheet），账号相关页面不再给。
                      */
                     Spacer(Modifier.height(22.dp))
                     SectionHeader("一起听", modifier = Modifier.padding(start = 22.dp))
                     SakuraCard(modifier = Modifier.padding(horizontal = 16.dp)) {
-                        SettingRow(
-                            title = "一起听",
-                            subtitle = togetherSubtitle,
-                            onClick = { showTogether = true },
-                            trailing = {
-                                Icon(
-                                    imageVector = Icons.Rounded.KeyboardArrowRight,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                                )
+                        TogetherOverviewPanel(
+                            onOpenPartner = { userId, nickname ->
+                                partnerFor = userId to nickname
                             },
-                        )
-                        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                        // 累计读数：这就是「账户中心的一起听统计」那一块。
-                        TogetherStats(
-                            overview = togetherOverview,
-                            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
                         )
                     }
                 }
@@ -253,10 +231,11 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
         )
     }
 
-    if (showTogether) {
-        TogetherSheet(
-            onDismiss = { showTogether = false },
-            onMessage = viewModel::showMessage,
+    partnerFor?.let { (userId, nickname) ->
+        TogetherPartnerDialog(
+            partnerId = userId,
+            partnerName = nickname,
+            onDismiss = { partnerFor = null },
         )
     }
 }
@@ -305,6 +284,184 @@ private fun AccountHeader(user: PublicUser) {
                 }
             }
         }
+    }
+}
+
+/**
+ * 第三方账号：**只读**展示这个账号绑定了什么。
+ *
+ * 绑定 / 解绑的扫码流程只在网页端与桌面端提供，这里不摆入口，只把结果列出来：
+ * - 「存到服务器」的凭据：带头像、昵称与登录方式，各端通用；
+ * - 「仅本机」的凭据：只认这台设备的请求头，看不到账号信息，如实说明；
+ * - 没绑的平台：一行「未绑定」。
+ */
+@Composable
+private fun ThirdPartyAccounts() {
+    val container = appContainer()
+    var attempt by remember { mutableIntStateOf(0) }
+    var loading by remember { mutableStateOf(true) }
+    var serverItems by remember { mutableStateOf<List<ServerCredentialItem>>(emptyList()) }
+    var failed by remember { mutableStateOf(false) }
+
+    LaunchedEffect(attempt) {
+        loading = true
+        failed = false
+        val result = runCatching { container.api.serverCredentials() }
+        loading = false
+        result
+            .onSuccess { serverItems = it.items }
+            .onFailure { failed = true }
+    }
+
+    // 本机凭据只有 Cookie、没有账号信息；读一次即可——在这一页上它不会变。
+    val localBound = remember {
+        Platform.entries.filter { it.isKnown }.associateWith { container.localCredentials.cookieOf(it) != null }
+    }
+
+    when {
+        loading && serverItems.isEmpty() -> {
+            Text(
+                text = "正在读取…",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+
+        failed && serverItems.isEmpty() -> {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = "读取失败",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = { attempt++ }) { Text("重试") }
+            }
+        }
+
+        else -> {
+            val known = Platform.entries.filter { it.isKnown }
+            val anyBound = known.any { platform ->
+                serverItems.any { it.platform == platform } || localBound[platform] == true
+            }
+            if (!anyBound && !loading) {
+                Text(
+                    text = "还没有绑定第三方音乐账号。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            known.forEachIndexed { index, platform ->
+                if (index > 0) HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                ThirdPartyAccountRow(
+                    platform = platform,
+                    server = serverItems.firstOrNull { it.platform == platform },
+                    localOnly = serverItems.none { it.platform == platform } &&
+                        localBound[platform] == true,
+                )
+            }
+        }
+    }
+}
+
+/** 一个平台一行：服务器凭据显示账号，「仅本机」只说明来源，没绑就是「未绑定」。 */
+@Composable
+private fun ThirdPartyAccountRow(
+    platform: Platform,
+    server: ServerCredentialItem?,
+    localOnly: Boolean,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        val nickname = server?.profile?.nickname?.trim().orEmpty()
+        if (nickname.isNotEmpty()) {
+            AccountAvatar(
+                avatar = server?.profile?.avatar,
+                fallbackInitial = nickname.take(1).uppercase(),
+                modifier = Modifier.size(40.dp),
+            )
+        } else {
+            // 没拿到账号信息时用平台首字占位：这一行的主角是「哪个平台」，不是某个人。
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surfaceVariant,
+                modifier = Modifier.size(40.dp),
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text(
+                        text = platform.label.take(1),
+                        style = MaterialTheme.typography.titleSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.width(12.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = nickname.ifEmpty { platform.label },
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    // 带权重（不撑满）：昵称很长时让位给右边的会员标识，而不是把标识挤出这一行。
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                /*
+                 * 会员标识：接口只给 ASCII 档位标识（`vipLabel`，上游字段名），中文由客户端映射
+                 * （见 formatVipLabel）——QQ 音乐是绿钻 / 豪华绿钻 / 超级会员；网易云的档位上游
+                 * 给不出可靠的，统一显示 `VIP`。
+                 * 「查不到」与「不是会员」由 `vip` 的可空性区分，缺省就整个不显示。
+                 */
+                if (server?.profile?.vip == true) {
+                    Spacer(Modifier.width(6.dp))
+                    Surface(
+                        shape = MaterialTheme.shapes.extraSmall,
+                        color = MaterialTheme.colorScheme.primaryContainer,
+                    ) {
+                        Text(
+                            text = formatVipLabel(platform, server.profile.vipLabel),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 1.dp),
+                        )
+                    }
+                }
+            }
+            Text(
+                text = thirdPartySubtitle(platform = platform, server = server, localOnly = localOnly),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** 一行副标题：平台名 + 登录方式 + 凭据存在哪 / 还管不管用。 */
+@Composable
+private fun thirdPartySubtitle(
+    platform: Platform,
+    server: ServerCredentialItem?,
+    localOnly: Boolean,
+): String = buildString {
+    append(server?.platformLabel?.takeIf { it.isNotBlank() } ?: platform.label)
+    when {
+        server != null -> {
+            when (server.profile.login) {
+                "qq" -> append(" · QQ 登录")
+                "wx" -> append(" · 微信登录")
+            }
+            append(if (server.status == "invalid") " · 凭据已失效" else " · 已保存到服务器")
+            formatPlayedAt(server.updatedAt)?.let { append(" · 更新于 $it") }
+        }
+
+        localOnly -> append(" · 仅本机凭据，看不到账号信息")
+
+        else -> append(" · 未绑定")
     }
 }
 

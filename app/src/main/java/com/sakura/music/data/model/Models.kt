@@ -446,7 +446,35 @@ data class AccountProfile(
     val avatar: String? = null,
     val userId: String? = null,
     val vip: Boolean? = null,
+    /**
+     * 会员档位**标识**（ASCII、不本地化，取值是「点亮的是哪个上游字段」）：
+     * QQ 音乐 `vip`（绿钻）/ `svip`（豪华绿钻）/ `huge_vip`（超级会员，字段名与产品名是反的）。
+     * **网易云一律为空**：上游给不出可靠档位（见 `gateway/src/upstream/netease.ts`）。
+     *
+     * 接口只给标识、不给展示文案，中文在客户端映射（见
+     * [com.sakura.music.ui.util.formatVipLabel]）：网易云不看这个字段、统一显示 `VIP`，
+     * QQ 侧缺省（旧数据或档位查询失败）时显示通用的「会员」。
+     */
+    val vipLabel: String? = null,
+    /** 凭据是哪种登录拿到的（`qq` / `wx`），界面上标在昵称旁。 */
+    val login: String? = null,
 )
+
+/** 服务端加密保存的一条第三方凭据（「仅本机」模式的不在其中）。 */
+@Serializable
+data class ServerCredentialItem(
+    val platform: Platform = Platform.UNKNOWN,
+    val platformLabel: String = "",
+    val mode: String = "server",
+    val profile: AccountProfile = AccountProfile(),
+    /** `active` = 可用；`invalid` = 上游不认了，要重新扫码。 */
+    val status: String = "",
+    val lastError: String? = null,
+    val updatedAt: String = "",
+)
+
+@Serializable
+data class CredentialListResponse(val items: List<ServerCredentialItem> = emptyList())
 
 /* ------------------------------ 简单响应 ------------------------------ */
 

@@ -161,8 +161,14 @@ fun QueueSheet(
     onDismiss: () -> Unit,
 ) {
     val listState = rememberLazyListState()
-    // 打开时定位到正在播的那一首，队列很长时才不用自己找。
-    LaunchedEffect(currentIndex) {
+    /*
+     * 打开时定位到正在播的那一首，队列很长时才不用自己找。
+     *
+     * 键用 `Unit`（而不是 `currentIndex`）是**故意的**：这个 sheet 每次打开都是一次新的组合，
+     * 只在这里定位一次就够。跟着 `currentIndex` 走的话，在列表里点一首别的歌（或自动切歌、
+     * 或删掉前面某首导致下标平移）都会把列表拽上去——刚点的那首被顶到最上面，正在翻的位置就丢了。
+     */
+    LaunchedEffect(Unit) {
         if (currentIndex >= 0) listState.scrollToItem(currentIndex)
     }
 

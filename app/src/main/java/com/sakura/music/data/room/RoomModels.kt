@@ -233,3 +233,34 @@ data class TogetherOverview(
     /** 一起听过的次数；服务端明细表不在时为 null（界面少显示一个数字即可）。 */
     val sessionCount: Int? = null,
 )
+
+/** 一起听伙伴的基本信息（明细弹窗的标题栏用）。 */
+@Serializable
+data class TogetherPartnerBasic(
+    val userId: String = "",
+    val nickname: String = "",
+    val avatar: String? = null,
+)
+
+/** 一次「一起听」的明细。 */
+@Serializable
+data class TogetherSessionItem(
+    /** 这一次一起听的开始时间（ISO 字符串）。 */
+    val startedAt: String = "",
+    val seconds: Double = 0.0,
+)
+
+/** 某位伙伴的详细一起听记录。 */
+@Serializable
+data class TogetherPartnerDetail(
+    val partner: TogetherPartnerBasic = TogetherPartnerBasic(),
+    /** 与这位伙伴的累计一起听时长（秒）。 */
+    val totalSeconds: Double = 0.0,
+    /** 一起听过的次数；服务端明细表不在时为 null。 */
+    val sessionCount: Int? = null,
+    /**
+     * 每次明细，最近的在前；服务端明细表不在时为 null
+     * （那时只有累计可用，界面要说清楚，而不是显示成"没听过"）。
+     */
+    val sessions: List<TogetherSessionItem>? = null,
+)
