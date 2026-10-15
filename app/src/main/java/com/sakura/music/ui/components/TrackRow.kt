@@ -46,8 +46,13 @@ fun TrackRow(
     isPlaying: Boolean = false,
     isFavorite: Boolean = false,
     showFavorite: Boolean = true,
-    /** 当前这一首实际用的是哪个音源，用来在副标题前挂一个徽标。 */
+    /**
+     * 这一首**眼下会用的**音源平台：它的点画实心，其余来源画空心（见 [PlatformBadge]）。
+     * 传 null 表示「还不知道」——点照样画，只是没有实心的那个。
+     */
     activePlatform: Platform? = null,
+    /** 是否在副标题前画平台点。 */
+    showSources: Boolean = true,
     /** 覆盖副标题（歌手页显示专辑名、历史页显示播放时间等）。 */
     subtitle: String? = null,
     /** 时长位置的替代文案。 */
@@ -100,9 +105,22 @@ fun TrackRow(
             )
             Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                if (activePlatform != null && activePlatform.isKnown) {
-                    PlatformBadge(platform = activePlatform)
-                    Spacer(Modifier.width(6.dp))
+                /*
+                 * 每个来源一个点，而不是只画主来源：一首歌两个平台都有时，用户就该看见两个
+                 * （与网页端的曲目行一致）。实心的是眼下会用的那个，空心的是「这个平台也有」。
+                 *
+                 * 不写平台名，是因为这一行已经有歌手、专辑、时长；红绿映射是固定的，看几次就记住。
+                 */
+                if (showSources) {
+                    track.sources.forEach { source ->
+                        if (!source.platform.isKnown) return@forEach
+                        PlatformBadge(
+                            platform = source.platform,
+                            selected = source.platform == activePlatform,
+                            showLabel = false,
+                        )
+                        Spacer(Modifier.width(5.dp))
+                    }
                 }
                 Text(
                     text = subtitle

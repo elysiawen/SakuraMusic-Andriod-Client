@@ -238,13 +238,22 @@ private fun QueueList(
                         modifier = Modifier.width(28.dp),
                     )
                     Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = track.title.ifBlank { "未知歌曲" },
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = track.title.ifBlank { "未知歌曲" },
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = if (isCurrent) MaterialTheme.colorScheme.primary else Color.Unspecified,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                // 带权重但不撑满：歌名过长时自己截断，别把会员角标挤出这一行
+                                // （账户中心昵称那行是同一个写法）。
+                                modifier = Modifier.weight(1f, fill = false),
+                            )
+                            if (track.vip == true) {
+                                Spacer(Modifier.width(6.dp))
+                                VipBadge()
+                            }
+                        }
                         Text(
                             text = track.artistText.ifBlank { "未知歌手" },
                             style = MaterialTheme.typography.bodySmall,

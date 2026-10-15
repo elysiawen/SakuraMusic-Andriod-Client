@@ -69,6 +69,10 @@ fun ArtistRow(
                         PlatformBadge(
                             platform = source.platform,
                             onClick = { onClick(source.platform, source.id) },
+                            // 只留小点：一排最多三个，写成平台名会把歌手名挤没。
+                            // 这几个点是「去哪个平台」，没有「在用」之分，所以都画实心。
+                            selected = true,
+                            showLabel = false,
                         )
                     }
                 }
@@ -113,8 +117,9 @@ fun AlbumRow(
             )
             Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 只有这一个来源，它就是「会用的那个」——传 selected 保持实心，别被画成空心圈。
                 source?.platform?.let {
-                    PlatformBadge(platform = it)
+                    PlatformBadge(platform = it, selected = true, showLabel = false)
                     Spacer(Modifier.width(6.dp))
                 }
                 Text(
@@ -165,8 +170,9 @@ fun PlaylistSummaryRow(
             )
             Spacer(Modifier.height(3.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
+                // 同上：单一来源，实心。
                 if (summary.platform.isKnown) {
-                    PlatformBadge(platform = summary.platform)
+                    PlatformBadge(platform = summary.platform, selected = true, showLabel = false)
                     Spacer(Modifier.width(6.dp))
                 }
                 Text(

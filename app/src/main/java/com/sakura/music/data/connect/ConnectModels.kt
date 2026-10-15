@@ -32,6 +32,14 @@ data class TrackSummary(
      * 少了这一段就只能干看着。
      */
     val sources: List<TrackSourceRef> = emptyList(),
+    /**
+     * 这首歌是否需要会员（网关 `TrackSnapshot.vip`）。
+     *
+     * 与 `sources` 同理，是跟着一起传的**显示信息**：跟随播放重建曲目时不会再去补一次
+     * 单曲详情，不带就永远显不出那个角标。网关只在为 true 时才发这个字段，
+     * 缺省（老网关、本地曲目）与 false 等价——角标只认 true。
+     */
+    val vip: Boolean? = null,
 )
 
 /** [TrackSummary.sources] 的元素；协议里 `platform` 是字符串，所以不直接复用 [TrackSource]。 */
@@ -138,6 +146,8 @@ fun UnifiedTrack.toTrackSummary(): TrackSummary = TrackSummary(
     album = album.name,
     cover = album.cover?.takeIf { it.isNotBlank() },
     durationMs = durationMs,
+    // 会员角标跟着一起走：对端不会去补单曲详情，丢了就永远显不出来。
+    vip = vip,
     // 协议：最多 4 条，`platform` 与 `id` 为空的项丢掉。
     sources = sources
         .filter { it.platform.isKnown && it.id.isNotBlank() }
@@ -177,6 +187,7 @@ fun TrackSummary.toUnifiedTrack(): UnifiedTrack? {
         album = AlbumRef(name = album, cover = cover?.takeIf { it.isNotBlank() }),
         durationMs = durationMs,
         sources = restored,
+        vip = vip,
     )
 }
 

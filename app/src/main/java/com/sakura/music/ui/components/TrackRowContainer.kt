@@ -58,8 +58,15 @@ fun TrackRowContainer(
 
     val isFavorite = favorites.contains(track.key)
     val isCurrent = playback.current?.key == track.key
-    // 正在播的那一首要标的是「实际在用的音源」，其余行标的是主来源。
-    val badge = if (isCurrent) playback.activePlatform else track.primarySource?.platform
+    /*
+     * 高亮哪个平台：正在播的那一首看**实际在用的音源**，其余行看主来源（与网页端的
+     * activeSourcePlatform 同一套判断）。
+     *
+     * 正在播、但音源还没解析出来的那一小段，`playback.activePlatform` 是空的 ——
+     * 这时退回主来源；否则整行的点会一起变空心，看着像「哪个都不用」。
+     * 列出来的是 `track.sources`（见 TrackRow），这里只决定哪个画实心。
+     */
+    val highlight = (if (isCurrent) playback.activePlatform else null) ?: track.primarySource?.platform
 
     val toggleFavorite: () -> Unit = {
         scope.launch {
@@ -81,7 +88,8 @@ fun TrackRowContainer(
         isPlaying = isCurrent && playback.isPlaying,
         isFavorite = isFavorite,
         showFavorite = showFavorite,
-        activePlatform = badge?.takeIf { showPlatform },
+        activePlatform = highlight,
+        showSources = showPlatform,
         subtitle = subtitle,
         trailingText = trailingText,
         onFavoriteClick = if (showFavorite) toggleFavorite else null,
