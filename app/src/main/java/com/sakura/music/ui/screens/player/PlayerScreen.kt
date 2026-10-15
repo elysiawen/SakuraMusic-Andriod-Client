@@ -10,6 +10,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -364,6 +365,24 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background),
     ) {
+        /*
+         * 这页是**浮层**（见 `SakuraRoot` 的 `PlayerHost`）：底下的导航内容——发现 / 账号页、
+         * 底部那条导航栏、列表里的行——都还组合着，为的是「往下拖能看到它们」。
+         *
+         * 但「画在上层」**不等于**「挡住点击」：Compose 的命中测试会把落在**空白处**的点击
+         * 一路透到下面那层去。表现就是「在播放页上点空白区域，结果切到了账号页」，
+         * 或者更隐蔽的「点到了底下列表里的某一首歌」。
+         *
+         * 所以在内容**底下**垫一层只吃点击的挡板：上面那层（按钮、封面拖动）先命中，
+         * 落在空白处的那些由它吃掉。用 `pointerInput` 而不是 `clickable` —— 它只是个挡板，
+         * 不该在无障碍树里多出一个什么都没有的控件。
+         */
+        Box(
+            modifier = Modifier
+                .matchParentSize()
+                .pointerInput(Unit) { detectTapGestures { } },
+        )
+
         Column(
             modifier = Modifier
                 .offset { IntOffset(0, collapseOffset.value.roundToInt()) }
@@ -523,8 +542,9 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                             canSkip = state.queue.size > 1,
                             playMode = playMode,
                             onPlayMode = {
-                        // 房间接管期间播放顺序由服务端统一决定：改本机的没有意义，改了也会被覆盖。
-                        if (seatHere) message = "一起听期间由房间统一控制播放顺序" else container.playbackCenter.cyclePlayMode()
+                        // 房间里模式是两端共享的：按同一个循环顺序推进一次，交给房间去改
+                        // （服务端随下一帧广播回来，两端的图标一起变）。
+                        if (seatHere) container.roomSync.setMode(playMode.next()) else container.playbackCenter.cyclePlayMode()
                     },
                             onQueue = { showQueue = true },
                             onPrevious = { previousTrack() },
@@ -617,8 +637,9 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     canSkip = state.queue.size > 1,
                     playMode = playMode,
                     onPlayMode = {
-                        // 房间接管期间播放顺序由服务端统一决定：改本机的没有意义，改了也会被覆盖。
-                        if (seatHere) message = "一起听期间由房间统一控制播放顺序" else container.playbackCenter.cyclePlayMode()
+                        // 房间里模式是两端共享的：按同一个循环顺序推进一次，交给房间去改
+                        // （服务端随下一帧广播回来，两端的图标一起变）。
+                        if (seatHere) container.roomSync.setMode(playMode.next()) else container.playbackCenter.cyclePlayMode()
                     },
                     onQueue = { showQueue = true },
                     onPrevious = { previousTrack() },

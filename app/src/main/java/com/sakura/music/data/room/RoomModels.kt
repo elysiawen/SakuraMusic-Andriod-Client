@@ -107,6 +107,13 @@ data class RoomPlayback(
     /** 秒。 */
     val duration: Double = 0.0,
     val track: TrackSummary? = null,
+    /**
+     * 房间的播放模式：`order` / `all` / `one` / `shuffle`。
+     *
+     * **它是房间的共享状态**（任一方改，两端一起变），服务端据此决定「自然播完往哪走」。
+     * 缺省表示服务端没给（老网关），此时界面不动、一切照旧。
+     */
+    val mode: String? = null,
     /** 这一帧是「有成员播不了、全员跳过」产生的。 */
     val skipReason: String? = null,
     /** 被跳过的那首的名字（提示用）。 */
@@ -189,6 +196,13 @@ data class CreateRoomBody(
     val kind: String = "duo",
     val queue: List<UnifiedTrack> = emptyList(),
     val index: Int = 0,
+    /**
+     * 房间的初始播放模式（`order` / `all` / `one` / `shuffle`）。
+     *
+     * 建房时**带上自己此刻的模式**，免得刚建好就被服务端的默认值（`order`）改掉；
+     * 加入方则以房间的 `mode` 为准。
+     */
+    val mode: String? = null,
 )
 
 /** `POST /api/rooms/join` 的请求体。 */

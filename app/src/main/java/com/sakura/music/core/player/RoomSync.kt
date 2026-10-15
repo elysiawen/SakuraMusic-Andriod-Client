@@ -4,6 +4,7 @@ import android.os.SystemClock
 import com.sakura.music.data.connect.ConnectClient
 import com.sakura.music.data.connect.toUnifiedTrack
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.remote.ApiException
 import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.remote.friendlyMessage
@@ -243,6 +244,9 @@ class RoomSync(
                 deviceKind = client.deviceKind,
                 queue = local.queue,
                 index = local.index.coerceAtLeast(0),
+                // 房间的初始模式沿用建房者此刻的模式：否则一进房就会被服务端默认的
+                // `order` 改掉，用户会觉得「我刚切好的随机没了」。
+                mode = PlayMode.wireOf(playback.playMode.value),
             )
             enterRoom(result.code)
             _notice.value = "一起听已创建，房间码 ${result.code}"
@@ -381,6 +385,18 @@ class RoomSync(
                 put(FIELD_INDEX, startIndex)
             },
         )
+    }
+
+    /**
+     * 改房间的播放模式（**两端共享**）。
+     *
+     * 只上报、不本地抢先改：服务端随下一帧 `room-playback` 把 `mode` 广播回来，两端一起变
+     * （本机的显示也是在那一帧才更新，见 [applyPlayback]）。房间里播放器是中性的
+     * （`PlaybackCenter.setRoomPlayMode`），播完往哪走由服务端按这个模式决定，所以这里改了
+     * 不会让本机自己去循环或随机。
+     */
+    fun setMode(mode: PlayMode) {
+        act(ACTION_SET_MODE, buildJsonObject { put(FIELD_MODE, PlayMode.wireOf(mode)) })
     }
 
     /* ------------------------------ 时长 / 进度读数 ------------------------------ */
@@ -541,6 +557,15 @@ class RoomSync(
 
         // 旁观：看得到房间在放什么，但那与本机播放器无关，连「播不了」的提示都不该弹。
         if (_spectating.value) return
+
+        /*
+         * 房间的播放模式：更新顶栏那个按钮的显示（房间里它是共享的，两端一起变）。
+         *
+         * 只动显示、不动播放器 —— 房间期间 ExoPlayer 必须保持中性，播完往哪走由服务端决定
+         * （见 `PlaybackCenter.showRoomPlayMode`）。认不出的取值直接忽略：老网关不发这个字段，
+         * 手改过的存档也可能带上奇怪的值，那时宁可不动。
+         */
+        PlayMode.fromIdOrNull(state.mode)?.let(playback::showRoomPlayMode)
 
         if (state.skipReason == SKIP_UNPLAYABLE && !state.skippedTitle.isNullOrBlank()) {
             // 两端都会收到这一帧：各自提示一次「这首播不了，已跳过」。
@@ -973,6 +998,7 @@ class RoomSync(
         const val ACTION_PLAY_NOW = "playNow"
         const val ACTION_REMOVE = "remove"
         const val ACTION_SET_QUEUE = "setQueue"
+        const val ACTION_SET_MODE = "setMode"
         const val ACTION_ENDED = "ended"
         const val ACTION_UNPLAYABLE = "unplayable"
 
@@ -981,6 +1007,7 @@ class RoomSync(
         const val FIELD_TRACK = "track"
         const val FIELD_TRACK_KEY = "trackKey"
         const val FIELD_QUEUE = "queue"
+        const val FIELD_MODE = "mode"
 
         const val SKIP_UNPLAYABLE = "unplayable"
     }

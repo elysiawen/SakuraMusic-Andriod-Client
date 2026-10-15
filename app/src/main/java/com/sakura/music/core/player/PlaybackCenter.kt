@@ -148,6 +148,14 @@ class PlaybackCenter(
     val playMode: StateFlow<PlayMode> = _playMode.asStateFlow()
 
     /**
+     * 用户**自己**的播放模式（设置里那份）。
+     *
+     * 房间接管期间 [playMode] 显示的是**房间下发的**模式（见 [showRoomPlayMode]），两者在房间里
+     * 就会不一样：退房时要把用户自己这份还回去，而不是把房间的模式留成他的默认（见 [setRoomPlayMode]）。
+     */
+    private var personalPlayMode: PlayMode = PlayMode.All
+
+    /**
      * 一次性提示（不阻断界面）。
      *
      * 有些情况不该塞进 [PlaybackState.error]：那个是整屏的「无法播放」浮层，
@@ -249,6 +257,10 @@ class PlaybackCenter(
         }
         scope.launch {
             settings.playMode.collect { mode ->
+                // 设置里那份永远记下来（退房要还回去），但它管不到房间期间显示的那个值。
+                personalPlayMode = mode
+                // 房间接管期间模式由房间说了算：设置值别把界面上的模式盖掉，也别去动播放器。
+                if (roomPlayMode) return@collect
                 _playMode.value = mode
                 mainScope.launch { applyPlayMode(mode) }
             }
@@ -730,7 +742,10 @@ class PlaybackCenter(
      *
      * 房间是权威，切歌由服务端统一决定。本机要是还开着列表循环或单曲循环，播完一首它
      * 自己就跳走了，而服务端的 `ended` 还没回来——两边各切一次，队列立刻错位。
-     * 退房时把用户自己的播放模式还回去（[applyPlayMode]）。
+     *
+     * **房间下发的模式只影响界面显示，不落到播放器**（见 [showRoomPlayMode]）：随机那种
+     * 模式要是真开给 ExoPlayer，它会自己随机跳一首，跟服务端的随机结果很可能不是同一首。
+     * 退房时把用户自己的播放模式还回去（[personalPlayMode]，界面与播放器一起）。
      */
     fun setRoomPlayMode(enabled: Boolean) {
         roomPlayMode = enabled
@@ -740,9 +755,22 @@ class PlaybackCenter(
                 active.repeatMode = Player.REPEAT_MODE_OFF
                 active.shuffleModeEnabled = false
             } else {
-                applyPlayMode(_playMode.value)
+                // 退房：界面上的模式也换回用户自己那份——房间里显示的是房间下发的那个。
+                _playMode.value = personalPlayMode
+                applyPlayMode(personalPlayMode)
             }
         }
+    }
+
+    /**
+     * 房间里下发的播放模式：**只改界面显示，不动 ExoPlayer**。
+     *
+     * 房间期间播放器必须是「中性」的（见 [setRoomPlayMode]）：本机要是自己循环或随机，
+     * 播完一首就抢在服务端的 `ended` 之前切歌，两端立刻错位。所以这个值只是拿来画顶栏那个
+     * 按钮的图标，以及让用户知道「房间现在是什么模式」——播完往哪走仍由服务端决定。
+     */
+    fun showRoomPlayMode(mode: PlayMode) {
+        _playMode.value = mode
     }
 
     /* ------------------------------ 传输控制 ------------------------------ */

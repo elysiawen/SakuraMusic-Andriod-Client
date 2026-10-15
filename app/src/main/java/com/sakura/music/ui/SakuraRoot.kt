@@ -54,6 +54,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -167,6 +168,8 @@ private fun PlayerHost(
             navController = navController,
             navigator = navigator,
             controller = controller,
+            // 浮层露着时，底下的导航内容要**一并从无障碍树里排除**（见 SakuraNavigation）。
+            playerVisible = playerVisible,
             // 打开播放页时记下出发页，之后才知道该回到哪。
             onOpenPlayer = {
                 openedFrom = navController.currentBackStackEntry
@@ -394,6 +397,14 @@ private fun SakuraNavigation(
     navController: NavHostController,
     navigator: SakuraNavigator,
     controller: MediaController?,
+    /**
+     * 播放页浮层此刻是不是露着。
+     *
+     * 露着时下面这一整套（导航栏 + 迷你条 + 页面内容）**对无障碍要当成不存在**：它们被
+     * 播放页盖住了，用户看不见也点不到（点击由播放页那层挡板吃掉）。不排除的话，TalkBack
+     * 仍会聚焦到「发现 / 账号」和底下的列表行上，读出来的东西和屏幕上的完全对不上。
+     */
+    playerVisible: Boolean,
     onOpenPlayer: () -> Unit,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
@@ -439,6 +450,18 @@ private fun SakuraNavigation(
                                 WindowInsets.navigationBars.only(WindowInsetsSides.Horizontal),
                             )
                         },
+                    )
+                    /*
+                     * 播放页浮层露着时，这一组（迷你条 + 导航栏）还在组合——为的是「往下拖能看到
+                     * 底下的页面」——但用户看不见、也点不到（点击已被播放页那层挡板吃掉），
+                     * 所以对无障碍要当成不存在，否则 TalkBack 仍会聚焦到「发现 / 账号」上。
+                     *
+                     * `clearAndSetSemantics {}` 把这棵子树的语义整棵清掉（等于对无障碍「不存在」）。
+                     * 不用 `enabled = false`：那会把导航栏染成禁用色，往下拖的时候看得出来；
+                     * 这里要的只是「无障碍看不见」，视觉与手感都不动。
+                     */
+                    .then(
+                        if (playerVisible) Modifier.clearAndSetSemantics { } else Modifier,
                     ),
             ) {
                 MiniPlayerBar(controller = controller, onOpen = onOpenPlayer)
@@ -479,7 +502,11 @@ private fun SakuraNavigation(
                 .fillMaxSize()
                 // 内容让开底部栏 + 迷你播放条的位置。
                 .padding(bottom = padding.calculateBottomPadding())
-                .background(MaterialTheme.colorScheme.background),
+                .background(MaterialTheme.colorScheme.background)
+                // 同上：浮层露着时这一整页都被它盖住，对无障碍一并清掉（详情页把它盖住时不算）。
+                .then(
+                    if (playerVisible) Modifier.clearAndSetSemantics { } else Modifier,
+                ),
             enterTransition = {
                 if (tabDirection() != 0) {
                     slideInHorizontally(

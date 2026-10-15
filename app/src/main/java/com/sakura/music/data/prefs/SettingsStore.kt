@@ -313,7 +313,19 @@ enum class PlayMode(val label: String) {
     }
 
     companion object {
-        fun fromId(id: String?): PlayMode =
-            entries.firstOrNull { it.name.equals(id, ignoreCase = true) } ?: All
+        /** 认不出的 id 归到 [All]（设置里存的值、用户手改过的存档都可能认不出）。 */
+        fun fromId(id: String?): PlayMode = fromIdOrNull(id) ?: All
+
+        /**
+         * 认不出就返回 null。
+         *
+         * 与 [fromId] 的区别是**不替调用方兜底**：协议里过来的模式值认不出时，
+         * 调用方要的是「这条别理它」，而不是「当成列表循环」。
+         */
+        fun fromIdOrNull(id: String?): PlayMode? =
+            id?.let { value -> entries.firstOrNull { it.name.equals(value, ignoreCase = true) } }
+
+        /** 协议用的取值：`order` / `all` / `one` / `shuffle`（与 [fromId] 互为逆）。 */
+        fun wireOf(mode: PlayMode): String = mode.name.lowercase()
     }
 }

@@ -397,7 +397,8 @@ class SakuraApi(
      * 创建房间。
      *
      * [queue] 是可选的初始歌单——一起听一般就从「你现在正在听的那一队列」开始，
-     * 所以调用方通常直接把本机队列当种子递进来。
+     * 所以调用方通常直接把本机队列当种子递进来。[mode] 同理：带上自己此刻的播放模式，
+     * 房间就用它当初始值（不带则按服务端默认的 `order`）。
      */
     suspend fun createRoom(
         deviceId: String,
@@ -406,6 +407,7 @@ class SakuraApi(
         queue: List<UnifiedTrack>,
         index: Int,
         kind: String = ROOM_KIND_DUO,
+        mode: String? = null,
     ): RoomCodeResponse = client.request(
         method = "POST",
         path = "/api/rooms/create",
@@ -419,6 +421,7 @@ class SakuraApi(
                 kind = kind,
                 queue = queue,
                 index = index,
+                mode = mode,
             ),
         ),
     )
