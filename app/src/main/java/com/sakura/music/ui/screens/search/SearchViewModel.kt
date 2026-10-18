@@ -9,12 +9,15 @@ import com.sakura.music.data.model.SearchType
 import com.sakura.music.data.model.UnifiedAlbum
 import com.sakura.music.data.model.UnifiedArtist
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.prefs.PlatformCapability
 import com.sakura.music.data.prefs.SettingsStore
 import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.remote.friendlyMessage
+import com.sakura.music.data.repo.PlatformPrefsRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -27,6 +30,7 @@ import kotlinx.coroutines.launch
 class SearchViewModel(
     private val api: SakuraApi,
     private val settings: SettingsStore,
+    private val platformPrefs: PlatformPrefsRepository,
 ) : ViewModel() {
 
     data class UiState(
@@ -65,6 +69,12 @@ class SearchViewModel(
     init {
         viewModelScope.launch {
             settings.searchHistory.collect { _history.value = it }
+        }
+        // 平台开关变了就重搜：否则页面还留着关闭前那批结果，看起来像没生效。
+        viewModelScope.launch {
+            platformPrefs.state.drop(1).collect {
+                if (_state.value.searched && _state.value.keyword.isNotBlank()) search()
+            }
         }
     }
 
@@ -116,7 +126,15 @@ class SearchViewModel(
         val type = _state.value.type
         viewModelScope.launch {
             _state.update { it.copy(loading = true, error = null, searched = true) }
-            runCatching { api.search(keyword, type, page = 1, limit = PAGE_SIZE) }
+            runCatching {
+                api.search(
+                    keyword = keyword,
+                    type = type,
+                    page = 1,
+                    limit = PAGE_SIZE,
+                    platforms = platformPrefs.queryParam(PlatformCapability.SEARCH),
+                )
+            }
                 .onSuccess { result ->
                     // 搜出结果才记进历史：手滑打错、或是网络没通的那次不值得留。
                     settings.rememberSearch(keyword)
@@ -159,7 +177,15 @@ class SearchViewModel(
         viewModelScope.launch {
             _state.update { it.copy(loadingMore = true) }
             val nextPage = current.page + 1
-            runCatching { api.search(keyword, current.type, page = nextPage, limit = PAGE_SIZE) }
+            runCatching {
+                api.search(
+                    keyword = keyword,
+                    type = current.type,
+                    page = nextPage,
+                    limit = PAGE_SIZE,
+                    platforms = platformPrefs.queryParam(PlatformCapability.SEARCH),
+                )
+            }
                 .onSuccess { result ->
                     _state.update {
                         it.copy(

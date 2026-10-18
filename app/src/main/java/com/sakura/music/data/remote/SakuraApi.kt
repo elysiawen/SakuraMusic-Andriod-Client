@@ -23,6 +23,8 @@ import com.sakura.music.data.model.PlaylistListResponse
 import com.sakura.music.data.model.PlaylistResponse
 import com.sakura.music.data.model.PlaylistSummary
 import com.sakura.music.data.model.PlaylistSummaryListResponse
+import com.sakura.music.data.model.PreferenceEntry
+import com.sakura.music.data.model.PreferenceListResponse
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.QualitySerializer
 import com.sakura.music.data.model.RemoveTrackResponse
@@ -112,6 +114,20 @@ class SakuraApi(
     suspend fun serverCredentials(): CredentialListResponse =
         client.request("GET", "/api/credentials", CredentialListResponse.serializer())
 
+    /* ------------------------------ 云端偏好 ------------------------------ */
+
+    /** 云端偏好列表；只有「平台开关」这一个键会用到。 */
+    suspend fun preferences(): PreferenceListResponse =
+        client.request("GET", "/api/preferences", PreferenceListResponse.serializer())
+
+    /** 整份覆盖某个偏好键（网关不做字段级合并）。 */
+    suspend fun putPreference(key: String, value: JsonElement): PreferenceEntry = client.request(
+        method = "PUT",
+        path = "/api/preferences/${encode(key)}",
+        deserializer = PreferenceEntry.serializer(),
+        body = buildJsonObject { put("value", value) },
+    )
+
     /* ------------------------------ 账户 ------------------------------ */
 
     /** 未登录时返回 200 + `user: null`，不要拿它当鉴权探针。 */
@@ -178,11 +194,18 @@ class SakuraApi(
 
     /* ------------------------------ 音乐 ------------------------------ */
 
+    /**
+     * 聚合搜索。
+     *
+     * [platforms] 是用户启用的平台（逗号分隔）；null 表示全部。
+     * 网关只向这些平台发请求，被排除的平台也不会出现在 `platforms` 状态里。
+     */
     suspend fun search(
         keyword: String,
         type: SearchType = SearchType.SONG,
         page: Int = 1,
         limit: Int = 20,
+        platforms: String? = null,
     ): SearchResult = client.request(
         method = "GET",
         path = "/api/search",
@@ -192,6 +215,7 @@ class SakuraApi(
             "type" to type.id,
             "page" to page,
             "limit" to limit,
+            "platforms" to platforms,
         ),
     )
 
@@ -223,8 +247,13 @@ class SakuraApi(
             },
         )
 
-    suspend fun discoverFeed(): DiscoverFeed =
-        client.request("GET", "/api/discover/feed", DiscoverFeed.serializer())
+    /** 发现页；[platforms] 为空表示全部平台。 */
+    suspend fun discoverFeed(platforms: String? = null): DiscoverFeed = client.request(
+        method = "GET",
+        path = "/api/discover/feed",
+        deserializer = DiscoverFeed.serializer(),
+        query = mapOf("platforms" to platforms),
+    )
 
     suspend fun toplists(platform: Platform): PlaylistSummaryListResponse = client.request(
         method = "GET",

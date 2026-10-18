@@ -27,6 +27,9 @@ enum class Platform(val id: String, val label: String) {
     val isKnown: Boolean get() = this != UNKNOWN
 
     companion object {
+        /** 真实存在的平台（不含 [UNKNOWN]），顺序固定，用于合并与设置项遍历。 */
+        val known: List<Platform> = entries.filter { it.isKnown }
+
         fun fromId(id: String?): Platform =
             entries.firstOrNull { it.id.equals(id?.trim(), ignoreCase = true) } ?: UNKNOWN
     }
@@ -527,6 +530,17 @@ data class PlatformInfo(
 
 @Serializable
 data class PlatformListResponse(val items: List<PlatformInfo> = emptyList())
+
+/** 云端偏好条目：网关不解释 `value` 的语义，原样收下交给业务层解析。 */
+@Serializable
+data class PreferenceEntry(
+    val key: String = "",
+    val value: JsonElement? = null,
+    val updatedAt: String = "",
+)
+
+@Serializable
+data class PreferenceListResponse(val items: List<PreferenceEntry> = emptyList())
 
 @Serializable
 data class HealthResponse(

@@ -53,6 +53,7 @@ import com.sakura.music.data.cache.CacheUsage
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.prefs.DetailHeaderStyle
+import com.sakura.music.data.prefs.PlatformCapability
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.prefs.RoutePreference
 import com.sakura.music.data.prefs.SettingsStore
@@ -81,7 +82,10 @@ private enum class SheetKind {
 }
 
 /**
- * 设置：外观（强调色 / 深浅色）、播放（音质 / 播放模式 / 优先音源）、网络与关于。
+ * 设置：外观（强调色 / 深浅色）、平台（总开关 + 能力开关）、播放、网络与关于。
+ *
+ * 平台排在播放之前：它决定了播放区里那些跨平台选项还有没有意义 ——
+ * 只剩一个平台时，「优先音源」整行隐藏，连接方式也只留这一个平台的一行。
  *
  * 网关地址默认取构建配置（`gradle.properties` 的 `sakura.gateway.url`），
  * 但可以在这里直接改，改完立刻生效、不用重新打包。
@@ -114,12 +118,17 @@ fun SettingsScreen(navigator: SakuraNavigator) {
         .collectAsStateWithLifecycle(initialValue = SettingsStore.DEFAULT_LYRIC_CACHE_DAYS)
     val metaCacheDays by container.settings.metaCacheDays
         .collectAsStateWithLifecycle(initialValue = SettingsStore.DEFAULT_META_CACHE_DAYS)
+    val platformPrefs by container.platformPrefs.state.collectAsStateWithLifecycle()
+    /** 总开关还开着的平台。只剩一个时，跨平台的选择项就没有意义了（见下方各处判断）。 */
+    val activePlatforms = Platform.known.filter { platformPrefs.isPlatformEnabled(it) }
 
     val cacheVm = rememberAppViewModel { CacheSettingsViewModel(it.cacheManager) }
     val cacheUsage by cacheVm.usage.collectAsStateWithLifecycle()
     val cacheWorking by cacheVm.working.collectAsStateWithLifecycle()
 
     var openSheet by remember { mutableStateOf<SheetKind?>(null) }
+    /** 平台开关的拦截提示（例如不能把最后一个可搜索的平台关掉）。 */
+    var platformNotice by remember { mutableStateOf<String?>(null) }
     var showGateway by remember { mutableStateOf(false) }
     var pendingClear by remember { mutableStateOf<CacheKind?>(null) }
     var confirmClearAll by remember { mutableStateOf(false) }
@@ -169,6 +178,74 @@ fun SettingsScreen(navigator: SakuraNavigator) {
 
             Spacer(Modifier.height(22.dp))
 
+            /*
+             * 平台放在播放之前：它决定了下面那些播放项有没有意义
+             * （只剩一个平台时，「优先音源」与两行连接方式都无从选起）。
+             */
+            SectionHeader("平台")
+            SakuraCard {
+                // 说明放在最上面：卡片开头不能是一条分割线，那会让它“压在一条空线上”。
+                Text(
+                    text = "开关存在 Sakura 账号下，登录后自动同步，与网页端共用同一份。" +
+                        "只影响搜索与推荐；收藏、歌单、历史里已有的歌照常播放。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                )
+                Platform.known.forEach { platform ->
+                    val platformOn = platformPrefs.isPlatformEnabled(platform)
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    SwitchRow(
+                        title = "启用${platform.label}",
+                        subtitle = if (platformOn) {
+                            "关掉后这个平台的搜索、推荐、账号歌单一起停用"
+                        } else {
+                            "已停用，下面的能力设置会保留"
+                        },
+                        checked = platformOn,
+                        onCheckedChange = { checked ->
+                            scope.launch {
+                                platformNotice = container.platformPrefs
+                                    .setPlatformEnabled(platform, checked)
+                            }
+                        },
+                    )
+                    /*
+                     * 只展示对这个客户端有意义的能力：
+                     * 音乐库是网关自建数据（收藏 / 自建歌单 / 历史），没有「按平台浏览账号歌单」
+                     * 的页面，所以 library 这一项在这里不出现；它的值仍随云端同步给网页端。
+                     */
+                    PlatformCapability.entries
+                        .filter { it != PlatformCapability.LIBRARY }
+                        .forEach { capability ->
+                            SwitchRow(
+                                title = capability.label,
+                                subtitle = capability.hint,
+                                checked = platformPrefs.isEnabled(platform, capability),
+                                enabled = platformOn,
+                                onCheckedChange = { checked ->
+                                    scope.launch {
+                                        platformNotice = container.platformPrefs
+                                            .setCapabilityEnabled(platform, capability, checked)
+                                    }
+                                },
+                                modifier = Modifier.padding(start = 14.dp),
+                            )
+                        }
+                }
+                platformNotice?.let { notice ->
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    Text(
+                        text = notice,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(22.dp))
+
             SectionHeader("播放")
             SakuraCard {
                 SettingRow(
@@ -196,19 +273,22 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                         )
                     },
                 )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingRow(
-                    title = "优先音源",
-                    subtitle = "同一首歌在两个平台都有时，默认用哪个",
-                    onClick = { openSheet = SheetKind.Platform },
-                    trailing = {
-                        Text(
-                            text = preferredPlatform?.label ?: "自动",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    },
-                )
+                // 只剩一个平台时没有「优先」可讲：整行连同分割线一起不出现。
+                if (activePlatforms.size > 1) {
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    SettingRow(
+                        title = "优先音源",
+                        subtitle = "同一首歌在两个平台都有时，默认用哪个",
+                        onClick = { openSheet = SheetKind.Platform },
+                        trailing = {
+                            Text(
+                                text = preferredPlatform?.label ?: "自动",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                    )
+                }
                 HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
                 SwitchRow(
                     title = "与其他应用一起播放",
@@ -241,22 +321,28 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                         )
                     },
                 )
-                // 两个平台被防盗链卡住的程度不一样，所以分开设：一个省带宽、一个要稳，
-                // 共用一个开关必然有一边要将就。
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingRow(
-                    title = "网易云连接方式",
-                    subtitle = neteaseRoute.hint,
-                    onClick = { openSheet = SheetKind.RouteNetease },
-                    trailing = { ValueText(neteaseRoute.label) },
-                )
-                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
-                SettingRow(
-                    title = "QQ 音乐连接方式",
-                    subtitle = qqRoute.hint,
-                    onClick = { openSheet = SheetKind.RouteQq },
-                    trailing = { ValueText(qqRoute.label) },
-                )
+                /*
+                 * 两个平台被防盗链卡住的程度不一样，所以分开设：一个省带宽、一个要稳，
+                 * 共用一个开关必然有一边要将就。
+                 *
+                 * 只剩一个平台时只留它那一行：连接方式（直连 / 中转）仍然有用，
+                 * 但没必要再摆出另一个已停用平台的设置。
+                 */
+                val routePlatforms =
+                    if (activePlatforms.size > 1) activePlatforms else listOfNotNull(activePlatforms.singleOrNull())
+                routePlatforms.forEach { platform ->
+                    val route = if (platform == Platform.QQ) qqRoute else neteaseRoute
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    SettingRow(
+                        title = "${platform.label}连接方式",
+                        subtitle = route.hint,
+                        onClick = {
+                            openSheet =
+                                if (platform == Platform.QQ) SheetKind.RouteQq else SheetKind.RouteNetease
+                        },
+                        trailing = { ValueText(route.label) },
+                    )
+                }
             }
 
             Spacer(Modifier.height(22.dp))

@@ -70,7 +70,7 @@ import java.time.LocalTime
 @Composable
 fun HomeScreen(navigator: SakuraNavigator) {
     val container = appContainer()
-    val viewModel = rememberAppViewModel { HomeViewModel(it.api) }
+    val viewModel = rememberAppViewModel { HomeViewModel(it.api, it.platformPrefs) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val auth by container.authRepository.state.collectAsStateWithLifecycle()
     val playback by container.playbackCenter.state.collectAsStateWithLifecycle()

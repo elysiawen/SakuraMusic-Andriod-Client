@@ -73,7 +73,7 @@ import kotlinx.coroutines.delay
 @Composable
 fun SearchScreen(navigator: SakuraNavigator) {
     val container = appContainer()
-    val viewModel = rememberAppViewModel { SearchViewModel(it.api, it.settings) }
+    val viewModel = rememberAppViewModel { SearchViewModel(it.api, it.settings, it.platformPrefs) }
     val state by viewModel.state.collectAsStateWithLifecycle()
     val history by viewModel.history.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }

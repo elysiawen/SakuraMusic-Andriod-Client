@@ -54,6 +54,15 @@ class SettingsStore(private val context: Context) {
 
         /** 搜索记录：换行分隔（关键词里的空白在存之前就被压平了，不会含换行）。 */
         val SearchHistory = stringPreferencesKey("search_history")
+
+        /**
+         * 平台开关。存「关掉的」而不是「开着的」：
+         * 默认全开，空集就是默认值，不必在升级时补写一遍。
+         */
+        val DisabledPlatforms = stringSetPreferencesKey("disabled_platforms")
+
+        /** 关掉的能力，记成 `platform:capability`；同样默认全开。 */
+        val DisabledCapabilities = stringSetPreferencesKey("disabled_capabilities")
     }
 
     /**
@@ -138,6 +147,27 @@ class SettingsStore(private val context: Context) {
     /** 搜索记录，最近搜过的在最前。 */
     val searchHistory: Flow<List<String>> = context.settingsDataStore.data
         .map { decodeHistory(it[Keys.SearchHistory]) }
+
+    /**
+     * 平台开关（总开关 + 能力开关）。
+     *
+     * 冷启动先用本地这份渲染，`PlatformPrefsRepository` 随后会用云端那份覆盖它。
+     */
+    val platformPrefs: Flow<PlatformPrefs> = context.settingsDataStore.data
+        .map { prefs ->
+            val disabledPlatforms = (prefs[Keys.DisabledPlatforms] ?: emptySet())
+                .map(Platform::fromId)
+                .toSet()
+            val disabledCapabilities = prefs[Keys.DisabledCapabilities] ?: emptySet()
+            PlatformPrefs(
+                enabled = Platform.known.associateWith { it !in disabledPlatforms },
+                capabilities = Platform.known.associateWith { platform ->
+                    PlatformCapability.entries.associateWith { capability ->
+                        "${platform.id}:${capability.id}" !in disabledCapabilities
+                    }
+                },
+            )
+        }
 
     suspend fun setAudioCacheMb(value: Int) = edit { it[Keys.AudioCacheMb] = value }
 
@@ -227,6 +257,48 @@ class SettingsStore(private val context: Context) {
     }
 
     suspend fun clearSearchHistory() = edit { it.remove(Keys.SearchHistory) }
+
+    /* ------------------------------ 平台开关 ------------------------------ */
+
+    suspend fun setPlatformEnabled(platform: Platform, value: Boolean) = edit { prefs ->
+        if (!platform.isKnown) return@edit
+        val current = prefs[Keys.DisabledPlatforms] ?: emptySet()
+        val next = if (value) current - platform.id else current + platform.id
+        if (next.isEmpty()) prefs.remove(Keys.DisabledPlatforms)
+        else prefs[Keys.DisabledPlatforms] = next
+    }
+
+    suspend fun setCapabilityEnabled(
+        platform: Platform,
+        capability: PlatformCapability,
+        value: Boolean,
+    ) = edit { prefs ->
+        if (!platform.isKnown) return@edit
+        val token = "${platform.id}:${capability.id}"
+        val current = prefs[Keys.DisabledCapabilities] ?: emptySet()
+        val next = if (value) current - token else current + token
+        if (next.isEmpty()) prefs.remove(Keys.DisabledCapabilities)
+        else prefs[Keys.DisabledCapabilities] = next
+    }
+
+    /** 用云端那份整体覆盖本地（只动平台开关相关的两个键）。 */
+    suspend fun applyPlatformPrefs(value: PlatformPrefs) = edit { prefs ->
+        val disabledPlatforms = Platform.known
+            .filterNot(value::isPlatformEnabled)
+            .map { it.id }
+            .toSet()
+        val disabledCapabilities = Platform.known.flatMap { platform ->
+            PlatformCapability.entries
+                .filterNot { value.capabilities[platform]?.get(it) ?: true }
+                .map { "${platform.id}:${it.id}" }
+        }.toSet()
+
+        if (disabledPlatforms.isEmpty()) prefs.remove(Keys.DisabledPlatforms)
+        else prefs[Keys.DisabledPlatforms] = disabledPlatforms
+
+        if (disabledCapabilities.isEmpty()) prefs.remove(Keys.DisabledCapabilities)
+        else prefs[Keys.DisabledCapabilities] = disabledCapabilities
+    }
 
     /** 保存网关地址；传进来的地址解析不了时回落到默认值。 */
     fun setGatewayUrl(raw: String) {

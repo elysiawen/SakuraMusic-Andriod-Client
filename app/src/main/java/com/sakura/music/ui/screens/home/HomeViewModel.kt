@@ -8,11 +8,14 @@ import com.sakura.music.data.model.DiscoverSection
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.PlaylistSummary
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.prefs.PlatformCapability
 import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.remote.friendlyMessage
+import com.sakura.music.data.repo.PlatformPrefsRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -27,7 +30,10 @@ data class HomeSection(
     val playlists: List<PlaylistSummary> = emptyList(),
 )
 
-class HomeViewModel(private val api: SakuraApi) : ViewModel() {
+class HomeViewModel(
+    private val api: SakuraApi,
+    private val platformPrefs: PlatformPrefsRepository,
+) : ViewModel() {
 
     data class UiState(
         val loading: Boolean = true,
@@ -51,6 +57,12 @@ class HomeViewModel(private val api: SakuraApi) : ViewModel() {
 
     init {
         load()
+        // 平台开关一变就换一批：关掉的平台不该继续留在当前这批区块里。
+        viewModelScope.launch {
+            platformPrefs.state.drop(1).collect {
+                if (_state.value.loaded) load(force = true)
+            }
+        }
     }
 
     /** `force = true` 是「换一批」。 */
@@ -63,7 +75,7 @@ class HomeViewModel(private val api: SakuraApi) : ViewModel() {
             _state.update {
                 it.copy(loading = !it.loaded, refreshing = it.loaded, error = null)
             }
-            runCatching { api.discoverFeed() }
+            runCatching { api.discoverFeed(platformPrefs.queryParam(PlatformCapability.DISCOVER)) }
                 .onSuccess { feed ->
                     _state.update {
                         it.copy(

@@ -16,14 +16,18 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sakura.music.data.model.Platform
+import com.sakura.music.ui.appContainer
 
 /** 平台品牌色：只用在那个小圆点上，整体配色依然是克制的。 */
 val Platform.brandColor: Color
@@ -69,6 +73,15 @@ fun PlatformBadge(
     /** 是否写出平台名；`false` = 只留颜色小点（见文件头）。 */
     showLabel: Boolean = true,
 ) {
+    /*
+     * 平台在设置里被关掉后，老内容（收藏 / 歌单 / 历史）里仍会有它的曲目。
+     * 徽标不能消失 —— 只压暗，表示它已不参与搜索与推荐，但歌还能放。
+     * 直接读容器而不是让每个调用点传参：这里只有一处判断，传参要改十几处调用。
+     */
+    val prefs by appContainer().platformPrefs.state.collectAsStateWithLifecycle()
+    val alpha = if (prefs.isPlatformEnabled(platform)) 1f else 0.45f
+    val tinted = modifier.alpha(alpha)
+
     if (!showLabel) {
         /*
          * 只留小点：刻意**不套**那层药丸（底色 + 描边）。药丸是为装下平台名才存在的，
@@ -78,7 +91,7 @@ fun PlatformBadge(
          * 变淡会把红绿一起冲淡，而看颜色正是这几个点唯一的用途。
          */
         Box(
-            modifier = modifier
+            modifier = tinted
                 // clickable 写在 padding **之前**，命中区才会把内边距算进去：
                 // 9dp 的点手指点不准，可点击时（歌手行的多平台入口）靠这圈撑到 25dp。
                 .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
@@ -101,7 +114,7 @@ fun PlatformBadge(
 
     val shape = MaterialTheme.shapes.extraSmall
     Surface(
-        modifier = modifier
+        modifier = tinted
             .clip(shape)
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         shape = shape,

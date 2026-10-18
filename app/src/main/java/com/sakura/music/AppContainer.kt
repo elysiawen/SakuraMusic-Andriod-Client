@@ -25,6 +25,7 @@ import com.sakura.music.data.remote.ApiClient
 import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.repo.AuthRepository
 import com.sakura.music.data.repo.LibraryRepository
+import com.sakura.music.data.repo.PlatformPrefsRepository
 import com.sakura.music.data.room.RoomCodeStore
 import com.sakura.music.data.session.LocalCredentialStore
 import com.sakura.music.data.session.SakuraCookieJar
@@ -76,6 +77,8 @@ class AppContainer(private val appContext: Context) {
              * 记着的房间码一起清掉——冷启动的自动回房就永远没机会发生了。
              */
             var started = false
+            // 登录态会因为改昵称之类的小事再发一次，平台开关没必要跟着重拉。
+            var prefsSynced = false
             authRepository.state.collect { auth ->
                 if (auth.isLoggedIn && !auth.offline) {
                     // 先把指令与房间事件的订阅者建出来再连：它们都是发给订阅者的，晚一步就可能丢。
@@ -83,9 +86,15 @@ class AppContainer(private val appContext: Context) {
                     roomSync
                     connectClient.start()
                     started = true
+                    if (!prefsSynced) {
+                        prefsSynced = true
+                        // 平台开关存在账号下：登录后把云端那份拉回来（失败就继续用本机快照）。
+                        scope.launch { platformPrefs.refreshFromCloud() }
+                    }
                 } else {
                     if (started) roomSync.stop()
                     started = false
+                    prefsSynced = false
                     connectClient.stop()
                 }
             }
@@ -240,6 +249,11 @@ class AppContainer(private val appContext: Context) {
 
     val libraryRepository: LibraryRepository by lazy {
         LibraryRepository(api = api, auth = authRepository)
+    }
+
+    /** 平台开关：设置页改、搜索/首页读，登录后与云端同步。 */
+    val platformPrefs: PlatformPrefsRepository by lazy {
+        PlatformPrefsRepository(api = api, settings = settings, auth = authRepository, scope = scope)
     }
 
     // ---- 播放 ----------------------------------------------------------------
