@@ -39,7 +39,7 @@ import com.sakura.music.ui.util.formatDuration
 import kotlinx.coroutines.delay
 
 /**
- * 设备列表：同一账号下的所有设备。
+ * 设备列表：同一账号下**当前在线**的设备（离线的不在 `devices` 里）。
  *
  * 这一层只负责「看」——谁在线、哪台在放什么。要动它就点进去，控制都在
  * [DeviceControlSheet] 里，免得列表本身挂满按钮、每行都挤成一团。
@@ -65,7 +65,7 @@ fun DeviceSheet(
         }
     }
 
-    SheetScaffold(title = "其它设备", onDismiss = onDismiss) {
+    SheetScaffold(title = "在线设备", onDismiss = onDismiss) {
         Column(modifier = Modifier.padding(bottom = 12.dp)) {
             val hint = when {
                 !connected -> "还没连上。登录后会自动连接，稍等片刻再打开这里。"
@@ -84,7 +84,9 @@ fun DeviceSheet(
                 )
             }
 
-            devices.forEach { device ->
+            // 本机永远置顶。
+            val ordered = devices.sortedBy { if (it.deviceId == selfId) 0 else 1 }
+            ordered.forEach { device ->
                 DeviceRow(
                     device = device,
                     isSelf = device.deviceId == selfId,

@@ -56,7 +56,7 @@ import com.sakura.music.ui.components.SectionHeader
 import com.sakura.music.ui.components.SettingRow
 import com.sakura.music.ui.components.SnackbarMessages
 import com.sakura.music.ui.components.TogetherOverviewPanel
-import com.sakura.music.ui.components.TogetherPartnerDialog
+import com.sakura.music.ui.components.TogetherPartnerSheet
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
 import com.sakura.music.ui.util.formatPlayedAt
@@ -232,7 +232,7 @@ fun AccountDetailScreen(navigator: SakuraNavigator) {
     }
 
     partnerFor?.let { (userId, nickname) ->
-        TogetherPartnerDialog(
+        TogetherPartnerSheet(
             partnerId = userId,
             partnerName = nickname,
             onDismiss = { partnerFor = null },

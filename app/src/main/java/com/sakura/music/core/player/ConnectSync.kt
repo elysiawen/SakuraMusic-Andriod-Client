@@ -1,17 +1,24 @@
 package com.sakura.music.core.player
 
 import android.os.SystemClock
+import com.sakura.music.data.connect.AddTrackPayload
 import com.sakura.music.data.connect.CommandEvent
 import com.sakura.music.data.connect.ConnectClient
 import com.sakura.music.data.connect.ConnectOutcome
 import com.sakura.music.data.connect.DeviceState
 import com.sakura.music.data.connect.DeviceView
+import com.sakura.music.data.connect.ModePayload
+import com.sakura.music.data.connect.QueueIndexPayload
+import com.sakura.music.data.connect.QueueSnapshotPayload
 import com.sakura.music.data.connect.SeekPayload
+import com.sakura.music.data.connect.TrackSummary
 import com.sakura.music.data.connect.TransferPayload
 import com.sakura.music.data.connect.VolumePayload
 import com.sakura.music.data.connect.toTrackSummary
 import com.sakura.music.data.connect.toUnifiedTrack
 import com.sakura.music.data.model.Quality
+import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.prefs.SettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -23,11 +30,13 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlin.math.abs
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.SerializationStrategy
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
@@ -56,7 +65,7 @@ import kotlin.math.abs
 class ConnectSync(
     private val client: ConnectClient,
     private val playback: PlaybackCenter,
-    settings: SettingsStore,
+    private val settings: SettingsStore,
     private val json: Json,
     private val scope: CoroutineScope,
 ) {
@@ -78,6 +87,19 @@ class ConnectSync(
 
     /** 正在跟随哪台设备。跟随 = 本机变成对方的镜像输出：曲目、播放态、进度都跟着它走。 */
     data class FollowTarget(val deviceId: String, val name: String)
+
+    /**
+     * 控制端缓存的对方播放列表（`queue` 请求的应答），按 deviceId 索引。
+     *
+     * 队列体积大（每首都带取流坐标），不放进每次变化都要全量广播的 [DeviceState]，
+     * 所以只在用户展开某台设备的列表时按需索取一份。设备下线后自动丢弃。
+     */
+    data class RemoteQueue(val queue: List<TrackSummary>, val index: Int, val receivedAt: Long)
+
+    private val _remoteQueues = MutableStateFlow<Map<String, RemoteQueue>>(emptyMap())
+
+    /** 界面要显示的「对方队列」；没拉到时没有这个 key。 */
+    val remoteQueues: StateFlow<Map<String, RemoteQueue>> = _remoteQueues.asStateFlow()
 
     /** 上报串行化：重试与事件上报撞在一起时，别让基准位置互相盖掉。 */
     private val reportLock = Mutex()
@@ -144,6 +166,11 @@ class ConnectSync(
             _following.collect { report() }
         }
 
+        // 播放模式也一样：遥控端的面板靠它高亮「它现在用的是哪种」。
+        scope.launch {
+            playback.playMode.collect { report() }
+        }
+
         // 偏差检测：纯本地，不产生网络请求。
         scope.launch {
             while (true) {
@@ -160,7 +187,10 @@ class ConnectSync(
 
         // 跟随：目标那边一动，`devices` 事件就会推过来，照它对一遍账即可。
         scope.launch {
-            client.devices.collect { devices -> syncFollow(devices) }
+            client.devices.collect { devices ->
+                syncFollow(devices)
+                pruneRemoteQueues(devices)
+            }
         }
     }
 
@@ -226,6 +256,8 @@ class ConnectSync(
             volume = state.volume.toDouble(),
             quality = quality.value,
             queueLength = state.queue.size,
+            // 模式也报上去：遥控端据此显示、并允许远程切换。
+            playMode = PlayMode.wireOf(playback.playMode.value),
             // 「谁跟着谁」要让对端看得见：光看两台都在放同一首歌，分不清是同步播放
             // 还是各放各的，被跟随的一方就没法确认对方到底跟上了没有。
             following = _following.value?.deviceId,
@@ -248,6 +280,22 @@ class ConnectSync(
     /* ------------------------------ 收指令 ------------------------------ */
 
     private suspend fun handle(event: CommandEvent) {
+        /*
+         * 队列快照的往返不改变任何播放状态，也不该触发一次全量广播：
+         * 一个是要一份列表，一个只是把列表记下来。
+         */
+        when (event.action) {
+            ACTION_QUEUE_STATE -> {
+                rememberQueue(event)
+                return
+            }
+
+            ACTION_QUEUE -> {
+                replyQueue(event.from)
+                return
+            }
+        }
+
         when (event.action) {
             // play 可以带队列（等于 transfer），不带就是 resume。
             "play" -> event.transferPayload()?.let(::loadAndPlay) ?: playback.play()
@@ -265,6 +313,25 @@ class ConnectSync(
             "volume" -> event.decode(VolumePayload.serializer())?.let {
                 playback.setVolume(it.volume.toFloat())
             }
+
+            /*
+             * 播放模式。一起听进行中时本机的模式归房间：这里改的是「用户自己那份」
+             * （退房后还给他），界面与播放器仍按房间走——遥控端看到模式没立刻变，
+             * 就明白该去房间里改。
+             */
+            "mode" -> event.decode(ModePayload.serializer())?.mode
+                ?.let { id -> PlayMode.fromIdOrNull(id) }
+                ?.let { mode -> settings.setPlayMode(mode) }
+
+            "playAt" -> event.decode(QueueIndexPayload.serializer())?.let {
+                playback.playAt(it.index)
+            }
+
+            "remove" -> event.decode(QueueIndexPayload.serializer())?.let {
+                playback.removeAt(it.index)
+            }
+
+            "add" -> event.decode(AddTrackPayload.serializer())?.track?.let(playback::addToQueue)
 
             // 对方要求本机跟随它。发起方（`from`）就是要跟随的对象——
             // 「让谁跟随谁」这个意图没法靠广播推断，只能有人明确要求一次。
@@ -305,6 +372,51 @@ class ConnectSync(
         if (target.isBlank()) return
         client.sendCommand(target, ACTION_TRANSFER, transferPayload())
     }
+
+    /* ------------------------------ 播放列表快照 ------------------------------ */
+
+    /**
+     * `queue`：把本机队列回传给请求方（`queueState`）。
+     *
+     * 只回**看列表需要的那几项**：对方拿它显示与点选，真正播放用的是它自己队列里的那份。
+     * 截到 [MAX_QUEUE_SNAPSHOT] 首，免得一条指令超过网关的 512KB 上限。
+     */
+    private suspend fun replyQueue(target: String) {
+        if (target.isBlank()) return
+        val state = playback.state.value
+        val payload = QueueSnapshotPayload(
+            queue = state.queue.take(MAX_QUEUE_SNAPSHOT).map { it.toTrackSummary() },
+            index = state.index.coerceAtLeast(0),
+        )
+        client.sendCommand(
+            target,
+            ACTION_QUEUE_STATE,
+            encode(QueueSnapshotPayload.serializer(), payload),
+        )
+    }
+
+    /** `queueState`：记下对方那份队列。 */
+    private fun rememberQueue(event: CommandEvent) {
+        if (event.from.isBlank()) return
+        val snapshot = event.decode(QueueSnapshotPayload.serializer()) ?: return
+        val entry = RemoteQueue(
+            queue = snapshot.queue.take(MAX_QUEUE_SNAPSHOT),
+            index = snapshot.index,
+            receivedAt = System.currentTimeMillis(),
+        )
+        _remoteQueues.update { it + (event.from to entry) }
+    }
+
+    /** 设备下线后它那份队列缓存就没用了：留着的话，它重新上线时会先闪一屏旧列表。 */
+    private fun pruneRemoteQueues(devices: List<DeviceView>) {
+        val alive = devices.mapTo(HashSet()) { it.deviceId }
+        _remoteQueues.update { queues ->
+            if (queues.keys.all { it in alive }) queues else queues.filterKeys { it in alive }
+        }
+    }
+
+    private fun <T> encode(serializer: SerializationStrategy<T>, value: T): JsonObject =
+        json.encodeToJsonElement(serializer, value) as JsonObject
 
     private fun loadAndPlay(payload: TransferPayload) {
         // `sources` 缺了就播不出来——接收方要靠 platform + id 去解析播放地址。
@@ -369,6 +481,44 @@ class ConnectSync(
      */
     suspend fun send(target: String, action: String, payload: JsonObject? = null): ConnectOutcome =
         client.sendCommand(target, action, payload)
+
+    /* ------------------------------ 遥控模式与播放列表 ------------------------------ */
+
+    /** 要一份对方的播放列表快照（`queue` → 对方回 `queueState`）。 */
+    suspend fun requestQueue(target: String): ConnectOutcome =
+        client.sendCommand(target, ACTION_QUEUE)
+
+    /** 切换对方的播放模式。 */
+    suspend fun remoteMode(target: String, mode: PlayMode): ConnectOutcome =
+        client.sendCommand(
+            target,
+            ACTION_MODE,
+            encode(ModePayload.serializer(), ModePayload(PlayMode.wireOf(mode))),
+        )
+
+    /** 播放对方队列里的第 [index] 首。*/
+    suspend fun remotePlayAt(target: String, index: Int): ConnectOutcome =
+        client.sendCommand(
+            target,
+            ACTION_PLAY_AT,
+            encode(QueueIndexPayload.serializer(), QueueIndexPayload(index)),
+        )
+
+    /** 从对方队列里移除第 [index] 首。*/
+    suspend fun remoteRemoveAt(target: String, index: Int): ConnectOutcome =
+        client.sendCommand(
+            target,
+            ACTION_REMOVE,
+            encode(QueueIndexPayload.serializer(), QueueIndexPayload(index)),
+        )
+
+    /** 往对方队列末尾追加一首（对方已有同一 `key` 时会拒绝，由它自己提示）。 */
+    suspend fun remoteAddTrack(target: String, track: UnifiedTrack): ConnectOutcome =
+        client.sendCommand(
+            target,
+            ACTION_ADD,
+            encode(AddTrackPayload.serializer(), AddTrackPayload(track)),
+        )
 
     /** 简单遥控：暂停、继续、下一首、上一首这类不需要 payload 的动作，发完做送达确认。 */
     suspend fun remote(target: String, action: String): AckResult {
@@ -601,6 +751,15 @@ class ConnectSync(
         const val FOLLOW_GRACE_MS = 15_000L
         const val ACTION_TRANSFER = "transfer"
         const val ACTION_RELEASE = "release"
+        const val ACTION_MODE = "mode"
+        const val ACTION_PLAY_AT = "playAt"
+        const val ACTION_REMOVE = "remove"
+        const val ACTION_ADD = "add"
+        const val ACTION_QUEUE = "queue"
+        const val ACTION_QUEUE_STATE = "queueState"
+
+        /** 队列快照最多回传这么多首：网关对指令 payload 有 512KB 上限（协议 7.6）。 */
+        const val MAX_QUEUE_SNAPSHOT = 200
     }
 }
 

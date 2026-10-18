@@ -12,11 +12,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -206,13 +204,13 @@ private fun TogetherPartnerRow(
 }
 
 /**
- * 「和某位好友的一起听记录」弹窗：每次一起听的日期与时长。
+ * 「和某位好友的一起听记录」弹层。
  *
- * 由统计面板点伙伴那一行打开。明细可能不可用（服务端那张表可以随时被删），
- * 这时要说清「只有累计可用」，而不是显示成"一次都没听过"。
+ * 明细可能不可用（服务端那张表可以随时被删），这时要说清「只有累计可用」，
+ * 而不是显示成"一次都没听过"。
  */
 @Composable
-fun TogetherPartnerDialog(
+fun TogetherPartnerSheet(
     partnerId: String,
     partnerName: String,
     onDismiss: () -> Unit,
@@ -232,42 +230,39 @@ fun TogetherPartnerDialog(
             .onFailure { error = it.message ?: "记录加载失败" }
     }
 
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("一起听记录") },
-        text = {
+    SheetScaffold(title = "一起听记录", onDismiss = onDismiss) {
+        Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp)) {
             // 先落到局部变量：`detail` 是委托属性，`when` 里没法智能转换。
             val current = detail
             when {
-                loading && current == null -> {
-                    Text(
-                        text = "正在读取…",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                loading && current == null -> Text(
+                    text = "正在读取…",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
+                )
 
-                current == null -> {
-                    Text(
-                        text = error ?: "记录加载失败",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
+                current == null -> Text(
+                    text = error ?: "记录加载失败",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
+                )
 
                 else -> PartnerDetailBody(detail = current, fallbackName = partnerName)
             }
-        },
-        confirmButton = {
-            TextButton(onClick = onDismiss) { Text("关闭") }
-        },
-    )
+        }
+    }
 }
 
-/** 弹窗主体：伙伴标题栏 + 明细列表（或「明细不可用」的说明）。 */
+/** 弹层主体：伙伴标题栏 + 明细列表（或「明细不可用」的说明）。 */
 @Composable
 private fun PartnerDetailBody(detail: TogetherPartnerDetail, fallbackName: String) {
-    Column(modifier = Modifier.fillMaxWidth()) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 24.dp, end = 24.dp, top = 14.dp),
+    ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             AccountAvatar(
                 avatar = detail.partner.avatar,
@@ -329,8 +324,7 @@ private fun PartnerDetailBody(detail: TogetherPartnerDetail, fallbackName: Strin
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(8.dp))
-                                .padding(horizontal = 10.dp, vertical = 8.dp),
+                                .padding(vertical = 8.dp),
                             horizontalArrangement = Arrangement.SpaceBetween,
                         ) {
                             Text(

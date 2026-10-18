@@ -71,6 +71,13 @@ data class DeviceState(
     val quality: String? = null,
     val queueLength: Int = 0,
     /**
+     * 播放模式：`order` / `all` / `one` / `shuffle`（与 [com.sakura.music.data.prefs.PlayMode] 对应）。
+     *
+     * 控制端拿它高亮对方现在用的是哪一种，也可以远程切换。老客户端不报这个字段，
+     * 控制端据此显示为**未知**，而不是假称顺序播放。
+     */
+    val playMode: String? = null,
+    /**
      * 本机正在跟随谁（对端的 `deviceId`）。
      *
      * 单独上报是为了让「谁跟着谁」成为**互相可见的事实**：光看两台都在放同一首歌，
@@ -133,6 +140,30 @@ data class SeekPayload(val position: Double = 0.0)
 /** `volume` 的 payload：0 ~ 1。 */
 @Serializable
 data class VolumePayload(val volume: Double = 0.0)
+
+/** `mode` 的 payload：要切换到的播放模式（`order` / `all` / `one` / `shuffle`）。 */
+@Serializable
+data class ModePayload(val mode: String = "")
+
+/** `playAt` / `remove` 的 payload：**对方队列**里的下标（从 0 开始）。 */
+@Serializable
+data class QueueIndexPayload(val index: Int = 0)
+
+/** `add` 的 payload：要追加到对方队列末尾的曲目。 */
+@Serializable
+data class AddTrackPayload(val track: UnifiedTrack? = null)
+
+/**
+ * `queue` / `queueState` 的 payload：一条队列快照。
+ *
+ * 队列不放进每次变化都全量广播的 [DeviceState]（每首都带取流坐标），所以按需索取：
+ * 控制端发 `queue`，被请求方用 `queueState` 回传这个结构。最多 200 首，见协议 7.6。
+ */
+@Serializable
+data class QueueSnapshotPayload(
+    val queue: List<TrackSummary> = emptyList(),
+    val index: Int = 0,
+)
 
 /** 协议规定 `track.sources` 最多 4 条。 */
 private const val MAX_TRACK_SOURCES = 4

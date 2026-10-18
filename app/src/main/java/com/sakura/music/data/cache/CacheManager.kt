@@ -211,11 +211,17 @@ class CacheManager(
 
     /** 删掉某个键的全部音频分片；下载被删除时用它，播放缓存淘汰也走它。 */
     fun removeAudio(cacheKey: String) {
-        val cache = audioCacheInstance ?: return
+        val cache = requireAudioCache()
         cache.getCachedSpans(cacheKey).forEach { span ->
             runCatching { cache.removeSpan(span) }
         }
     }
+
+    /** 清理类操作要按 key 动手，必须先有索引；冷启动后没播过歌时当场建起来。 */
+    private fun requireAudioCache(): SimpleCache = audioCacheInstance ?: audioCache
+
+    /** 目录里所有文件的字节和；目录不存在就是 0。 */
+    private fun directoryBytes(dir: File): Long = dir.walkTopDown().filter { it.isFile }.sumOf { it.length() }
 
     /** 按 [CacheKind.entries] 的顺序给出每一类的占用。会读磁盘，请在 IO 线程调用。 */
     @OptIn(ExperimentalCoilApi::class)
@@ -223,8 +229,13 @@ class CacheManager(
         when (kind) {
             CacheKind.AUDIO -> {
                 // 只读已经建好的缓存：为看一眼占用就把播放器依赖的缓存建起来不值得。
+                // 冷启动后还没播过歌时实例是空的，但磁盘上明明有缓存 —— 直接量目录。
                 val cache = audioCacheInstance
-                CacheUsage(kind, cache?.cacheSpace ?: 0L, cache?.keys?.size ?: 0)
+                if (cache != null) {
+                    CacheUsage(kind, cache.cacheSpace, cache.keys.size)
+                } else {
+                    CacheUsage(kind, directoryBytes(audioDir), 0)
+                }
             }
 
             CacheKind.COVER -> CacheUsage(kind, imageLoader.diskCache?.size ?: 0L, 0)
@@ -313,7 +324,7 @@ class CacheManager(
     }
 
     private fun clearAudio() {
-        val cache = audioCacheInstance ?: return
+        val cache = requireAudioCache()
         val protected = downloads.cacheKeys()
         cache.keys
             .filterNot { it in protected }

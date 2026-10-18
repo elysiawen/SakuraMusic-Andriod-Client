@@ -847,19 +847,46 @@ class PlaybackCenter(
         mainScope.launch {
             val active = controller ?: return@launch
             // 播过 4 秒以上时，「上一首」想表达的是「回到开头」。
-            if (active.currentPosition > 4_000) active.seekTo(0) else active.seekToPreviousMediaItem()
+            // 走 seekLocal：还没 prepare 的现场上普通 seekTo 会被丢掉，回不到开头。
+            if (active.currentPosition > 4_000) seekLocal(active, 0L) else active.seekToPreviousMediaItem()
         }
     }
 
     fun seekTo(positionMs: Long) {
+        val target = positionMs.coerceAtLeast(0L)
         mainScope.launch {
-            controller?.seekTo(positionMs.coerceAtLeast(0L))
-            _state.update { it.copy(positionMs = positionMs.coerceAtLeast(0L)) }
+            controller?.let { seekLocal(it, target) }
+            _state.update { it.copy(positionMs = target) }
         }
         // 多设备那条线要知道「用户拖了进度」：进度跳变不会产生任何播放状态变化，
         // 光靠事件驱动的话别的设备永远看不到这次拖动。Media3 也不会为 seek 回调，
         // 所以只能在这里主动说一声。
         _seeks.tryEmit(Unit)
+    }
+
+    /**
+     * 对本地播放器 seek：**没 prepare 时改的是「起播位置」**，不是普通 seek。
+     *
+     * 冷启动恢复出来的现场是 IDLE、没 prepare 的，这时 `seekTo` 会被 Media3 悄悄丢掉：
+     * `COMMAND_SEEK_IN_CURRENT_MEDIA_ITEM` 只在「当前曲目可 seek」时才下发，而没 prepare 的
+     * 播放器时间线还是空的（`BasePlayer.isCurrentMediaItemSeekable` 因此为 false），命令根本到不了
+     * 播放器。于是进度条看着拖到了 0，一按播放又回到恢复时的那个位置——界面改的是自己的 state，
+     * 播放器的起点还是 `setMediaItems` 时给的那个。
+     *
+     * 改法是把队列按新位置重新装一遍：`setMediaItems` 的 `startPositionMs` 正是给 prepare 用的
+     * 起始位置（[restoreSession] 也是靠它恢复进度的），装完再播就从这里开始。
+     */
+    private fun seekLocal(active: MediaController, positionMs: Long) {
+        val tracks = _state.value.queue
+        if (active.playbackState == Player.STATE_IDLE) {
+            val index = active.currentMediaItemIndex
+            // 队列对不上就先不动：宁可这次不生效，也不能把播放列表换残。
+            if (tracks.isNotEmpty() && tracks.size == active.mediaItemCount && index in tracks.indices) {
+                active.setMediaItems(itemsOf(tracks), index, positionMs)
+            }
+            return
+        }
+        active.seekTo(positionMs)
     }
 
     /** 播放模式那个按钮：顺序 → 列表循环 → 单曲循环 → 随机 → 顺序。 */

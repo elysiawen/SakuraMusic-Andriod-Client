@@ -2,31 +2,47 @@ package com.sakura.music.ui.components
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.QueueMusic
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.PlaylistPlay
+import androidx.compose.material.icons.rounded.Repeat
+import androidx.compose.material.icons.rounded.RepeatOne
+import androidx.compose.material.icons.rounded.Shuffle
 import androidx.compose.material.icons.rounded.SkipNext
 import androidx.compose.material.icons.rounded.SkipPrevious
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.VolumeOff
 import androidx.compose.material.icons.rounded.VolumeUp
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -43,6 +59,8 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sakura.music.core.player.AckResult
 import com.sakura.music.data.connect.ConnectOutcome
+import com.sakura.music.data.connect.TrackSummary
+import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.ui.appContainer
 import com.sakura.music.ui.util.formatDuration
 import kotlinx.coroutines.delay
@@ -50,6 +68,7 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 /**
@@ -99,9 +118,48 @@ fun DeviceControlSheet(
         }
     }
 
-    // 拖动期间显示手上的值：否则对方的进度每隔一秒就会把它盖回去。
-    var scrubbing by remember { mutableStateOf<Float?>(null) }
-    var volumeDraft by remember { mutableStateOf<Float?>(null) }
+    /*
+     * 滑块的草稿值。
+     *
+     * 它有两段生命期，少一段都会闪：
+     * - 手指按着：对方的进度每秒都会重算一次，value 若一直跟着它，滑块会被盖回去；
+     * - 松手之后：指令还在往返，对方上报的仍是旧值。此时立刻清掉草稿的话，滑块会先弹回
+     *   旧位置、等广播到了再跳回手指的位置 —— 就是那一下「闪回去又闪回来」。
+     *   所以草稿要留到真实值追上它（或超时）再撤。
+     */
+    var seekDraft by remember(device.deviceId) { mutableStateOf<SliderDraft?>(null) }
+    var volumeDraft by remember(device.deviceId) { mutableStateOf<SliderDraft?>(null) }
+
+    // 等回执：只是本地数值比较，不发任何请求。
+    LaunchedEffect(device.deviceId) {
+        while (true) {
+            delay(SLIDER_SETTLE_MS)
+            val liveState = container.connectClient.devices.value
+                .firstOrNull { it.deviceId == device.deviceId }
+                ?.state
+            val serverNow = container.connectClient.serverTimeNow
+            val wallNow = System.currentTimeMillis()
+
+            seekDraft = seekDraft?.takeUnless { draft ->
+                draftSettled(
+                    draft = draft,
+                    real = liveState?.let { livePositionSeconds(it, serverNow).toFloat() },
+                    trackKey = liveState?.track?.key,
+                    wallNow = wallNow,
+                    isVolume = false,
+                )
+            }
+            volumeDraft = volumeDraft?.takeUnless { draft ->
+                draftSettled(
+                    draft = draft,
+                    real = liveState?.volume?.toFloat(),
+                    trackKey = liveState?.track?.key,
+                    wallNow = wallNow,
+                    isVolume = true,
+                )
+            }
+        }
+    }
 
     /** 发一条不等确认的指令；只有发不出去时才吭声（成功看状态变化就够了）。 */
     fun fire(action: String, payload: JsonObject? = null) {
@@ -111,8 +169,30 @@ fun DeviceControlSheet(
         }
     }
 
+    /** 类型化的遥控动作（播放模式 / 播放列表）；同样只在发不出去时吭声。 */
+    fun fireRemote(block: suspend () -> ConnectOutcome) {
+        scope.launch {
+            val outcome = block()
+            if (outcome != ConnectOutcome.Delivered) onMessage(sendFailure(device.name, outcome))
+        }
+    }
+
+    /** 改完对方的队列后稍等再要一次：太快会拿到改之前那份。 */
+    fun refreshQueueSoon() {
+        scope.launch {
+            delay(400)
+            container.connectSync.requestQueue(device.deviceId)
+        }
+    }
+
     SheetScaffold(title = device.name, onDismiss = onDismiss) {
-        Column(modifier = Modifier.padding(bottom = 16.dp)) {
+        // 内容比屏幕高时可以滚：小屏上「跟随」那一组也不至于被硬切掉。
+        // 顶部留白是给分隔线的：歌名直接贴上去会像被裁掉一截。
+        Column(
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(top = 12.dp, bottom = 16.dp),
+        ) {
             Text(
                 text = track?.title?.ifBlank { "未知歌曲" } ?: "空闲",
                 style = MaterialTheme.typography.titleMedium,
@@ -159,15 +239,22 @@ fun DeviceControlSheet(
                 /* ------------------------------ 进度 ------------------------------ */
                 // 进度只能绑在「它手里有东西」上：没内容就没有进度可言。
                 val durationSec = state.duration.toFloat().coerceAtLeast(0f)
-                val shown = scrubbing ?: livePositionSeconds(state, now).toFloat()
+                // 草稿优先：按着时是手指的位置，松手后则是「等对方回执」的目标值。
+                val shown = seekDraft
+                    ?.takeIf { it.trackKey == track.key }
+                    ?.value
+                    ?: livePositionSeconds(state, now).toFloat()
                 Spacer(Modifier.height(8.dp))
                 Slider(
                     value = shown.coerceIn(0f, durationSec.coerceAtLeast(0.1f)),
-                    onValueChange = { scrubbing = it },
+                    onValueChange = { seekDraft = SliderDraft(value = it, trackKey = track.key) },
                     onValueChangeFinished = {
                         // 松手才发指令：一路拖一路发就是请求洪流。
-                        scrubbing?.let { fire("seek", seekPayload(it.toDouble())) }
-                        scrubbing = null
+                        // 草稿不在这里清掉 —— 要留到对方回执追上来，否则会先弹回旧位置。
+                        seekDraft?.let { draft ->
+                            seekDraft = draft.copy(committedAt = System.currentTimeMillis())
+                            fire("seek", seekPayload(draft.value.toDouble()))
+                        }
                     },
                     valueRange = 0f..durationSec.coerceAtLeast(0.1f),
                     enabled = durationSec > 0f,
@@ -199,7 +286,7 @@ fun DeviceControlSheet(
              * 但也正因为它属于设备而不是内容，**空着的设备一样有音量可调** ——
              * 它只是没在放歌，不代表不需要合适的响度。所以这一行不跟着「有内容」藏起来。
              */
-            val volume = volumeDraft ?: (state?.volume?.toFloat() ?: 1f)
+            val volume = volumeDraft?.value ?: (state?.volume?.toFloat() ?: 1f)
             Spacer(Modifier.height(6.dp))
             Row(
                 modifier = Modifier
@@ -215,10 +302,13 @@ fun DeviceControlSheet(
                 )
                 Slider(
                     value = volume.coerceIn(0f, 1f),
-                    onValueChange = { volumeDraft = it },
+                    onValueChange = { volumeDraft = SliderDraft(value = it) },
                     onValueChangeFinished = {
-                        volumeDraft?.let { fire("volume", volumePayload(it.toDouble())) }
-                        volumeDraft = null
+                        // 同进度：草稿留到对方回执把音量报回来（它那边有 300ms 防抖）。
+                        volumeDraft?.let { draft ->
+                            volumeDraft = draft.copy(committedAt = System.currentTimeMillis())
+                            fire("volume", volumePayload(draft.value.toDouble()))
+                        }
                     },
                     valueRange = 0f..1f,
                     modifier = Modifier
@@ -233,27 +323,206 @@ fun DeviceControlSheet(
             }
 
             /* ------------------------------ 传输控制 ------------------------------ */
+            // 模式是设备自己的状态：下发后等下一轮 devices 广播回填。
+            val remoteMode = state?.playMode?.let(PlayMode::fromIdOrNull)
+            var showModes by remember(device.deviceId) { mutableStateOf(false) }
+            var showQueue by remember(device.deviceId) { mutableStateOf(false) }
+
+            // 模式与队列收成切歌行两侧的图标，点开才出选择。
             Spacer(Modifier.height(12.dp))
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(20.dp, Alignment.CenterHorizontally),
-                verticalAlignment = Alignment.CenterVertically,
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp),
             ) {
-                IconButton(onClick = { fire("prev") }) {
-                    Icon(Icons.Rounded.SkipPrevious, contentDescription = "上一首")
+                Row(
+                    modifier = Modifier.align(Alignment.Center),
+                    horizontalArrangement = Arrangement.spacedBy(20.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    IconButton(onClick = { fire("prev") }) {
+                        Icon(Icons.Rounded.SkipPrevious, contentDescription = "上一首")
+                    }
+                    FilledIconButton(onClick = { fire("toggle") }, modifier = Modifier.size(52.dp)) {
+                        Icon(
+                            imageVector = if (state?.playing == true) {
+                                Icons.Rounded.Pause
+                            } else {
+                                Icons.Rounded.PlayArrow
+                            },
+                            contentDescription = if (state?.playing == true) "暂停" else "播放",
+                        )
+                    }
+                    IconButton(onClick = { fire("next") }) {
+                        Icon(Icons.Rounded.SkipNext, contentDescription = "下一首")
+                    }
                 }
-                FilledIconButton(onClick = { fire("toggle") }, modifier = Modifier.size(52.dp)) {
-                    Icon(
-                        imageVector = if (state?.playing == true) {
-                            Icons.Rounded.Pause
-                        } else {
-                            Icons.Rounded.PlayArrow
-                        },
-                        contentDescription = if (state?.playing == true) "暂停" else "播放",
-                    )
+
+                // 左：播放模式。图标画的就是它**现在**的模式，点开才给选项。
+                Box(modifier = Modifier.align(Alignment.CenterStart)) {
+                    IconButton(onClick = { showModes = true }) {
+                        Icon(
+                            imageVector = modeIcon(remoteMode),
+                            contentDescription = "播放模式：${remoteMode?.label ?: "未知"}",
+                            tint = if (remoteMode == null) {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            } else {
+                                MaterialTheme.colorScheme.primary
+                            },
+                        )
+                    }
+                    DropdownMenu(expanded = showModes, onDismissRequest = { showModes = false }) {
+                        PlayMode.entries.forEach { mode ->
+                            val selected = remoteMode == mode
+                            DropdownMenuItem(
+                                text = {
+                                    Text(
+                                        text = mode.label,
+                                        color = if (selected) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurface
+                                        },
+                                    )
+                                },
+                                leadingIcon = {
+                                    Icon(
+                                        imageVector = modeIcon(mode),
+                                        contentDescription = null,
+                                        tint = if (selected) {
+                                            MaterialTheme.colorScheme.primary
+                                        } else {
+                                            MaterialTheme.colorScheme.onSurfaceVariant
+                                        },
+                                    )
+                                },
+                                onClick = {
+                                    showModes = false
+                                    fireRemote { container.connectSync.remoteMode(device.deviceId, mode) }
+                                },
+                            )
+                        }
+                    }
                 }
-                IconButton(onClick = { fire("next") }) {
-                    Icon(Icons.Rounded.SkipNext, contentDescription = "下一首")
+
+                // 右：播放列表。角标就是对方队列的长度，省掉一行「N 首」的说明。
+                Box(modifier = Modifier.align(Alignment.CenterEnd)) {
+                    IconButton(onClick = { showQueue = true }) {
+                        val queued = state?.queueLength ?: 0
+                        BadgedBox(
+                            badge = {
+                                if (queued > 0) Badge { Text(if (queued > 99) "99+" else "$queued") }
+                            },
+                        ) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Rounded.QueueMusic,
+                                contentDescription = "播放列表",
+                            )
+                        }
+                    }
+                }
+            }
+
+            /* ------------------------------ 播放列表弹层 ------------------------------ */
+            // 队列体积大，点开才拉；每次打开、改完都重新要一份。
+            val remoteQueues by container.connectSync.remoteQueues.collectAsStateWithLifecycle()
+            val remoteQueue = remoteQueues[device.deviceId]
+
+            LaunchedEffect(showQueue, device.deviceId) {
+                if (showQueue) container.connectSync.requestQueue(device.deviceId)
+            }
+
+            if (showQueue) {
+                // 再开一层底部弹层；居中对话框的出场方向和这里对不上。
+                SheetScaffold(title = "播放列表 · ${device.name}", onDismiss = { showQueue = false }) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(bottom = 12.dp),
+                    ) {
+                        val snapshot = remoteQueue
+                        when {
+                            snapshot == null -> Text(
+                                text = "正在读取对方的播放列表…（对方版本较旧时可能读不到）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
+                            )
+
+                            snapshot.queue.isEmpty() -> Text(
+                                text = "对方的播放列表是空的",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.padding(horizontal = 24.dp, vertical = 14.dp),
+                            )
+
+                            else -> {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(start = 24.dp, end = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Text(
+                                        text = "共 ${snapshot.queue.size} 首 · 点一首让它播那首",
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.weight(1f),
+                                    )
+                                    TextButton(
+                                        onClick = {
+                                            fireRemote {
+                                                container.connectSync.requestQueue(device.deviceId)
+                                            }
+                                        },
+                                    ) {
+                                        Text("刷新")
+                                    }
+                                }
+                                // 列表自己滚（封顶 420dp）：和本机队列那张弹层同一套比例。
+                                LazyColumn(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .heightIn(max = 420.dp),
+                                ) {
+                                    itemsIndexed(snapshot.queue) { index, item ->
+                                        RemoteQueueRow(
+                                            index = index,
+                                            track = item,
+                                            current = index == snapshot.index,
+                                            onClick = {
+                                                fireRemote {
+                                                    container.connectSync.remotePlayAt(device.deviceId, index)
+                                                }
+                                                refreshQueueSoon()
+                                            },
+                                            onRemove = {
+                                                fireRemote {
+                                                    container.connectSync.remoteRemoveAt(device.deviceId, index)
+                                                }
+                                                refreshQueueSoon()
+                                            },
+                                        )
+                                    }
+                                }
+                                // 本机有正在播的歌时，才给「把它塞进去」这个动作。
+                                val local = playback.current
+                                if (local != null) {
+                                    TextButton(
+                                        onClick = {
+                                            fireRemote {
+                                                container.connectSync.remoteAddTrack(device.deviceId, local)
+                                            }
+                                            refreshQueueSoon()
+                                        },
+                                        modifier = Modifier.padding(start = 12.dp, top = 4.dp),
+                                    ) {
+                                        Text("＋ 加入本机当前这首")
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
 
@@ -309,6 +578,15 @@ fun DeviceControlSheet(
              * 这里也刻意不要求它「有内容」：本机正跟着它、或它正跟着本机时，解除的入口
              * 必须一直在 —— 它一停下来（track 变空）就把入口藏掉的话，用户没有别的办法脱身。
              */
+            // 「同步」：和上面一次性的投放/接管分开。
+            Spacer(Modifier.height(10.dp))
+            Text(
+                text = "同步",
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = 24.dp),
+            )
+            Spacer(Modifier.height(2.dp))
             when {
                 isFollowing -> ControlRow(
                     icon = Icons.Rounded.Close,
@@ -396,6 +674,123 @@ private fun ControlRow(
             )
         }
     }
+}
+
+/**
+ * 对方队列里的一行：序号 + 歌名 / 歌手 + 移除。
+ *
+ * 点整行 = 让那台设备播这一首；移除单独一个按钮，免得误点。
+ */
+@Composable
+private fun RemoteQueueRow(
+    index: Int,
+    track: TrackSummary,
+    current: Boolean,
+    onClick: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(start = 24.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = "${index + 1}",
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.width(24.dp),
+        )
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = track.title.ifBlank { "未知歌曲" },
+                style = MaterialTheme.typography.bodyMedium,
+                // 正在播的那首用主色标出来，扫一眼就知道它放到哪了。
+                color = if (current) {
+                    MaterialTheme.colorScheme.primary
+                } else {
+                    MaterialTheme.colorScheme.onSurface
+                },
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            if (track.artists.isNotBlank()) {
+                Text(
+                    text = track.artists,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        IconButton(onClick = onRemove) {
+            Icon(
+                imageVector = Icons.Rounded.Close,
+                contentDescription = "从对方队列移除",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+/** 模式图标；[mode] 为 null（空设备）时退回「顺序」。 */
+private fun modeIcon(mode: PlayMode?): ImageVector = when (mode) {
+    PlayMode.All -> Icons.Rounded.Repeat
+    PlayMode.One -> Icons.Rounded.RepeatOne
+    PlayMode.Shuffle -> Icons.Rounded.Shuffle
+    else -> Icons.Rounded.PlaylistPlay
+}
+
+/**
+ * 滑块的草稿值。
+ *
+ * [committedAt] 为 0 表示手指还按着；松手时填上提交时刻，之后一直留到真实值追上
+ * 或者超时（见 [draftSettled]）。
+ */
+private data class SliderDraft(
+    /** 要显示的值（进度为秒，音量为 0..1）。 */
+    val value: Float,
+    val committedAt: Long = 0L,
+    /** 提交时对方在放的那首：换了歌，这条进度草稿就没有意义了。 */
+    val trackKey: String = "",
+)
+
+/** 松手后最多等这么久：对方执行完会立刻补报状态，正常几十毫秒，这里只是失败时的兜底。 */
+private const val SLIDER_ACK_MS = 1_200L
+/** 草稿落地检查的间隔。 */
+private const val SLIDER_SETTLE_MS = 80L
+/** 判定「真实值已追上草稿」的容差：进度 1.5 秒（回执往返的误差），音量半个步进。 */
+private const val PROGRESS_TOLERANCE_S = 1.5f
+private const val VOLUME_TOLERANCE = 0.006f
+
+/**
+ * 松手之后的草稿什么时候可以撤。
+ *
+ * 只在两种情况下撤：对方的真实值追上了它（说明那条指令已经落地），或者等超时
+ * （对方离线、丢包时的兜底）。按着的草稿永远不撤 —— 那一段归 onValueChange 管。
+ */
+private fun draftSettled(
+    draft: SliderDraft,
+    real: Float?,
+    trackKey: String?,
+    wallNow: Long,
+    isVolume: Boolean,
+): Boolean {
+    // 还按着：不撤。此刻设备可能压根没上报过状态（空闲设备一样能调音量），
+    // 但手指还在滑块上，显示的就该是手上的值。
+    if (draft.committedAt == 0L) return false
+    // 对方迟迟没响应：兜底放手，别把一个旧位置永远钉在屏幕上。
+    if (wallNow - draft.committedAt > SLIDER_ACK_MS) return true
+    // 状态还没回来（或设备下线、手里没东西了）：继续等，最多等到上面那个超时。
+    if (real == null) return false
+    // 换歌了：旧进度对不上新的时长，撤掉。
+    if (!isVolume && draft.trackKey != trackKey.orEmpty()) return true
+
+    val tolerance = if (isVolume) VOLUME_TOLERANCE else PROGRESS_TOLERANCE_S
+    return abs(real - draft.value) <= tolerance
 }
 
 /** 拖动类指令的 payload；字段名与协议 7.1 一致。 */
