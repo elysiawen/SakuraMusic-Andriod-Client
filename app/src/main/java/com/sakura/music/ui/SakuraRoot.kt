@@ -52,8 +52,13 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
+import androidx.compose.ui.input.nestedscroll.NestedScrollSource
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -367,6 +372,18 @@ private val bottomDestinations = listOf(
 private const val TAB_SLIDE_FRACTION = 8
 
 /**
+ * 底栏展开 / 收起后的内容高度（不含系统手势区）。
+ *
+ * 展开那份写成常量而不是取 `NavigationBarDefaults`：M3 里这个值改过几次名字（`Height` → `ContainerHeight`），
+ * 写死 80dp（Material 规格里底栏的高度）不受版本影响；收起时矮一截，图标仍然居中。
+ */
+private val BAR_EXPANDED_HEIGHT = 80.dp
+private val BAR_COLLAPSED_HEIGHT = 56.dp
+
+/** 手指滑过这么远才收 / 放：太小的话列表的细微回弹会把底栏来回拨。 */
+private val BAR_COLLAPSE_THRESHOLD = 24.dp
+
+/**
  * 非页签切换（推入 / 返回详情页）时的页面转场参数。
  *
  * 播放器浮层也用这一组：它跳去歌手 / 专辑页、再从那儿回来时，扮的就是转场里「被推走 /
@@ -411,6 +428,42 @@ private fun SakuraNavigation(
     // 首帧 back stack 还没建好，按起始页（发现）算，免得底部栏闪一下才出现。
     val currentRoute = backStackEntry?.destination?.route ?: Routes.HOME
     val onMainDestination = currentRoute in Routes.mainDestinations
+
+    /*
+     * 底栏「收起」：内容往上翻的时候压掉一截、只留图标，往回滑或换页签再放下来。
+     *
+     * 听的是嵌套滚动，而不是让一级页面各自上报滚动位置——发现 / 账号各有各的列表，
+     * 从根上听一次就都覆盖了，页面那边不用知道底栏的存在。只认**手指拖动**：
+     * 甩出去之后的惯性要是继续收放，底栏就成了自己在那儿动，看着像失控。
+     */
+    var barCollapsed by remember { mutableStateOf(false) }
+    // 换页签就放下来：新的一页从顶部开始看，没有理由还是收着的。
+    LaunchedEffect(currentRoute) { barCollapsed = false }
+
+    val collapseThresholdPx = with(LocalDensity.current) { BAR_COLLAPSE_THRESHOLD.toPx() }
+    val barNestedScroll = remember(collapseThresholdPx) {
+        // 余量记在这里而不是 Composition 里：它只服务于「够不够一次收 / 放」，界面不看它。
+        var remainder = 0f
+        object : NestedScrollConnection {
+            override fun onPreScroll(available: Offset, source: NestedScrollSource): Offset {
+                if (source != NestedScrollSource.UserInput) return Offset.Zero
+                remainder += available.y
+                when {
+                    remainder <= -collapseThresholdPx -> {
+                        barCollapsed = true
+                        remainder = 0f
+                    }
+
+                    remainder >= collapseThresholdPx -> {
+                        barCollapsed = false
+                        remainder = 0f
+                    }
+                }
+                // 一个像素都不吃：底栏只是「顺便看一眼方向」，滚动的仍是列表。
+                return Offset.Zero
+            }
+        }
+    }
 
     /*
      * 底部那一组（迷你播放条 + 导航栏）脚下的空档。
@@ -481,6 +534,7 @@ private fun SakuraNavigation(
                 ) {
                     SakuraBottomBar(
                         currentRoute = currentRoute,
+                        collapsed = barCollapsed,
                         onSelect = { route ->
                             if (currentRoute != route) {
                                 navController.navigate(route) {
@@ -503,6 +557,8 @@ private fun SakuraNavigation(
                 // 内容让开底部栏 + 迷你播放条的位置。
                 .padding(bottom = padding.calculateBottomPadding())
                 .background(MaterialTheme.colorScheme.background)
+                // 底栏的收起 / 放下靠它听方向（见上面的 barNestedScroll）。
+                .nestedScroll(barNestedScroll)
                 // 同上：浮层露着时这一整页都被它盖住，对无障碍一并清掉（详情页把它盖住时不算）。
                 .then(
                     if (playerVisible) Modifier.clearAndSetSemantics { } else Modifier,
@@ -636,17 +692,44 @@ private fun SakuraNavigation(
 @Composable
 private fun SakuraBottomBar(
     currentRoute: String,
+    /** 收起态：只留图标，整条矮一截（内容往上翻的时候用）。 */
+    collapsed: Boolean,
     onSelect: (String) -> Unit,
 ) {
-    NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+    /*
+     * 压高度时要**把手势区那一段算进去**：`NavigationBar` 自己用 `windowInsetsPadding` 把系统
+     * 手势区垫在内部（底色也要刷到那儿），只按内容高度去压会把垫底那段一起切掉，底部漏出一条内容色。
+     */
+    val insetsBottom = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
+    val contentHeight by animateDpAsState(
+        targetValue = if (collapsed) BAR_COLLAPSED_HEIGHT else BAR_EXPANDED_HEIGHT,
+        animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
+        label = "bottomBarHeight",
+    )
+
+    NavigationBar(
+        containerColor = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.height(contentHeight + insetsBottom),
+    ) {
         bottomDestinations.forEach { destination ->
             val selected = currentRoute == destination.route
             NavigationBarItem(
                 selected = selected,
                 onClick = { onSelect(destination.route) },
-                icon = { Icon(destination.icon, contentDescription = null) },
-                label = {
-                    Text(text = destination.label, style = MaterialTheme.typography.labelSmall)
+                icon = {
+                    Icon(
+                        imageVector = destination.icon,
+                        // 收起时没有文字兜底，图标得自己把名字报给读屏。
+                        contentDescription = if (collapsed) destination.label else null,
+                    )
+                },
+                // 收起时整个标签槽都不给：留个空槽的话图标还是会被往上挤，白占地方。
+                label = if (collapsed) {
+                    null
+                } else {
+                    {
+                        Text(text = destination.label, style = MaterialTheme.typography.labelSmall)
+                    }
                 },
                 colors = NavigationBarItemDefaults.colors(
                     selectedIconColor = MaterialTheme.colorScheme.onPrimaryContainer,

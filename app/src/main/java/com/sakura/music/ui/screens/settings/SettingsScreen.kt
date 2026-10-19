@@ -186,7 +186,7 @@ fun SettingsScreen(navigator: SakuraNavigator) {
             SakuraCard {
                 // 说明放在最上面：卡片开头不能是一条分割线，那会让它“压在一条空线上”。
                 Text(
-                    text = "开关存在 Sakura 账号下，登录后自动同步，与网页端共用同一份。" +
+                    text = "存在 Sakura 账号下，登录后自动同步，与网页端共用同一份。" +
                         "只影响搜索与推荐；收藏、歌单、历史里已有的歌照常播放。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

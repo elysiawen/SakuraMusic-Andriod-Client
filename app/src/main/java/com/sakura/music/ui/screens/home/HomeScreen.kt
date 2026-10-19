@@ -37,6 +37,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
@@ -59,6 +60,7 @@ import com.sakura.music.ui.components.TrackCard
 import com.sakura.music.ui.navigation.CollectionKind
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.rememberAppViewModel
+import kotlinx.coroutines.launch
 import java.time.LocalTime
 
 /**
@@ -77,6 +79,16 @@ fun HomeScreen(navigator: SakuraNavigator) {
     val snackbar = remember { SnackbarHostState() }
 
     val current = state
+
+    /*
+     * 「第三方账号绑定请在网页端完成」那条提示：给个「×」关掉，关过就不再出现。
+     *
+     * 初值给 null 而不是 false——DataStore 是异步的，先按 false 画会让关过的用户每次冷启动
+     * 都看见它闪一下。读到了（false）才显示，读到 true 就一直不显示。
+     */
+    val bindingHintDismissed by container.settings.bindingHintDismissed
+        .collectAsStateWithLifecycle(initialValue = null)
+    val dismissScope = rememberCoroutineScope()
 
     // 「发现」那栏只在列表**回到最顶上**时才露出来：往下翻就把它收掉，高度让给内容。
     // 用 derivedStateOf 而不是直接读 listState：滚动每挪一个像素都会变的是偏移量，
@@ -173,14 +185,17 @@ fun HomeScreen(navigator: SakuraNavigator) {
                             }
                         }
 
-                        item(key = "binding-hint") {
-                            InfoNotice(
-                                icon = Icons.Rounded.QrCode,
-                                title = "第三方账号绑定请在网页端完成",
-                                message = "绑定后「每日推荐」「私人 FM」等个性化板块才会出现；搜索与播放始终可用。",
-                                tone = NoticeTone.Neutral,
-                                modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
-                            )
+                        if (bindingHintDismissed == false) {
+                            item(key = "binding-hint") {
+                                InfoNotice(
+                                    icon = Icons.Rounded.QrCode,
+                                    title = "第三方账号绑定请在网页端完成",
+                                    message = "绑定后「每日推荐」「私人 FM」等个性化板块才会出现；搜索与播放始终可用。",
+                                    tone = NoticeTone.Neutral,
+                                    onDismiss = { dismissScope.launch { container.settings.dismissBindingHint() } },
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
+                                )
+                            }
                         }
 
                         items(current.trackSections, key = { "t-${it.key}" }) { section ->

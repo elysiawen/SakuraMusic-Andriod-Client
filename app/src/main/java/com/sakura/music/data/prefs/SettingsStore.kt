@@ -43,6 +43,8 @@ class SettingsStore(private val context: Context) {
         val MixWithOthers = booleanPreferencesKey("mix_with_others")
         /** 仅在 Wi-Fi 下联网取流；移动网络下只播已缓存的歌。 */
         val WifiOnly = booleanPreferencesKey("wifi_only")
+        /** 发现页那条「第三方账号绑定请在网页端完成」的提示：关掉之后不再出现。 */
+        val BindingHintDismissed = booleanPreferencesKey("binding_hint_dismissed")
         val PreferredPlatform = stringPreferencesKey("preferred_platform")
         /** 直连被 CDN 拒过的平台：这些平台之后一律走网关中转（只对「智能」有用）。 */
         val ProxyOnlyPlatforms = stringSetPreferencesKey("proxy_only_platforms")
@@ -133,6 +135,17 @@ class SettingsStore(private val context: Context) {
     /** 用户手动指定的音源平台；为空表示按歌曲自带的优先级。 */
     val preferredPlatform: Flow<Platform?> = context.settingsDataStore.data
         .map { it[Keys.PreferredPlatform]?.let(Platform::fromId)?.takeIf { p -> p.isKnown } }
+
+    /**
+     * 发现页那条「第三方账号绑定请在网页端完成」的提示被关掉没有。
+     *
+     * 只记在本机：它说的是「这台设备的界面别再提示」，没有理由跨设备同步。
+     * 关掉是永久的——那句话解释的东西不会变（手机端就是绑不了），看明白一次就够。
+     */
+    val bindingHintDismissed: Flow<Boolean> = context.settingsDataStore.data
+        .map { it[Keys.BindingHintDismissed] ?: false }
+
+    suspend fun dismissBindingHint() = edit { it[Keys.BindingHintDismissed] = true }
 
     val proxyOnlyPlatforms: Flow<Set<Platform>> = context.settingsDataStore.data
         .map { prefs -> (prefs[Keys.ProxyOnlyPlatforms] ?: emptySet()).map(Platform::fromId).toSet() }

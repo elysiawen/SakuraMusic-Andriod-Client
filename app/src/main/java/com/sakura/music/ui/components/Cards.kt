@@ -16,11 +16,13 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.GraphicEq
 import androidx.compose.material.icons.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -347,6 +349,8 @@ fun InfoNotice(
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null,
     tone: NoticeTone = NoticeTone.Neutral,
+    /** 给了就在右边画一个「×」：这类提示大多是一次性的，看明白了该能自己关掉。 */
+    onDismiss: (() -> Unit)? = null,
 ) {
     val container = when (tone) {
         NoticeTone.Neutral -> MaterialTheme.colorScheme.surfaceVariant
@@ -392,6 +396,16 @@ fun InfoNotice(
             }
             if (actionLabel != null && onAction != null) {
                 TextButton(onClick = onAction) { Text(actionLabel, color = content) }
+            }
+            if (onDismiss != null) {
+                IconButton(onClick = onDismiss, modifier = Modifier.size(32.dp)) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "关闭",
+                        tint = content,
+                        modifier = Modifier.size(18.dp),
+                    )
+                }
             }
         }
     }

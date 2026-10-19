@@ -288,6 +288,13 @@ class PlaybackCenter(
             // 记住播放器**当前实际**的速率：镜像那边是「设过了就不再设」，值不能凭默认猜——
             // 换一个控制器接上来时，播放器可能还留着上一次留下的 ±5%。
             appliedSpeed = controller.playbackParameters.speed.coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
+            /*
+             * 播放模式是**播放器上**的状态，不是我们的：服务（播放器）可能是刚造出来的，
+             * 默认是顺序播放。而设置里那份通常在这之前就发出来了（`init` 里 collect，
+             * 那时 controller 还是 null，applyPlayMode 直接返回）——不在这里补一刀，
+             * 冷启动后「列表循环」就只是界面上那个图标：播到最后一首照样停。
+             */
+            applyPlayMode(personalPlayMode)
             syncQueue()
             syncFlags()
             _state.update { it.copy(positionMs = controller.currentPosition.coerceAtLeast(0L)) }
