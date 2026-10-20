@@ -17,6 +17,57 @@ import kotlinx.serialization.Serializable
 
 /* ------------------------------ 房间 ------------------------------ */
 
+/** 会员共享的平台标识。只有这两个参与共享。 */
+object EntitlementPlatform {
+    const val NETEASE = "netease"
+    const val QQ = "qq"
+
+    val ALL = listOf(NETEASE, QQ)
+
+    fun label(platform: String): String = when (platform) {
+        NETEASE -> "网易云音乐"
+        QQ -> "QQ 音乐"
+        else -> platform
+    }
+}
+
+/** 一次等待权益提供方确认的共享请求。 */
+@Serializable
+data class RoomEntitlementPending(
+    val platform: String = "",
+    /** 权益提供方：他的会员会被房间内所有人使用。 */
+    val targetUserId: String = "",
+    /** 发起人（可能不是 targetUserId，那正是需要确认的原因）。 */
+    val requestedBy: String = "",
+    val at: Long = 0L,
+)
+
+/**
+ * 会员共享状态，按平台分开。
+ *
+ * `active[platform]` 是提供权益的成员 userId，空 = 各用各的（默认）。
+ * 它只是**授权关系**：真正取流时由服务端拿提供方的凭据解析（见 `POST /api/rooms/source`）。
+ *
+ * 用 Map 而不是两个固定字段：平台集合将来可能变，缺字段也照样能反序列化。
+ */
+@Serializable
+data class RoomEntitlement(
+    val active: Map<String, String?> = emptyMap(),
+    val pending: Map<String, RoomEntitlementPending?> = emptyMap(),
+    /** 只有 `room-entitlement` 事件带它；快照里那份没有（用来校正本机时钟差）。 */
+    val serverNow: Long? = null,
+) {
+    /** 这个平台当前用谁的权益；空表示各用各的。 */
+    fun ownerOf(platform: String): String? = active[platform]
+
+    /** 这个平台待确认的请求。 */
+    fun pendingOf(platform: String): RoomEntitlementPending? = pending[platform]
+
+    companion object {
+        val EMPTY = RoomEntitlement()
+    }
+}
+
 /** 房间成员。席位按 `deviceId` 存（与连接解耦），所以断线仍是成员，只是 `online` 为 false。 */
 @Serializable
 data class RoomMemberView(
@@ -60,6 +111,8 @@ data class RoomView(
     val togetherSessionSeconds: Double = 0.0,
     /** 此刻是否正在走表（两人都在房间里）。为 true 时客户端自行把它推演到「现在」。 */
     val togetherCounting: Boolean = false,
+    /** 会员共享状态（按平台）。随快照下发，冷启动/重连后不必再单独拉。 */
+    val entitlement: RoomEntitlement = RoomEntitlement.EMPTY,
 ) {
 
     /** 双人房：2 人、人人平权、没有房主。协议里非 `group` 的一律按它处理。 */
@@ -176,6 +229,9 @@ sealed interface RoomStreamEvent {
     /** `room-playback`：房间播放态。 */
     data class Playback(val state: RoomPlayback, val serverNow: Long?) : RoomStreamEvent
 
+    /** `room-entitlement`：会员共享的授权状态变化（发起 / 确认 / 拒绝 / 撤销）。 */
+    data class Entitlement(val state: RoomEntitlement, val serverNow: Long?) : RoomStreamEvent
+
     /**
      * 连接（重新）建立。
      *
@@ -221,6 +277,33 @@ data class DeviceIdBody(val deviceId: String)
 /** `POST /api/rooms/create` 的响应。 */
 @Serializable
 data class RoomCodeResponse(val code: String = "")
+
+/** `POST /api/rooms/source` 的请求体：向服务端要一条「对方会员」的地址。 */
+@Serializable
+data class FetchSourceBody(
+    val deviceId: String,
+    val platform: String,
+    val trackKey: String,
+    val quality: String,
+)
+
+/**
+ * `POST /api/rooms/source` 的响应：服务端已用权益提供方的凭据解析好的直链。
+ *
+ * 只有地址，没有凭据——对方的 cookie 全程不出网关。
+ */
+@Serializable
+data class SharedSource(
+    val platform: String = "",
+    val trackKey: String = "",
+    val ownerUserId: String = "",
+    val url: String = "",
+    /** 直连需要的请求头（Referer / Origin / UA），交给 ExoPlayer 当默认请求头。 */
+    val headers: Map<String, String> = emptyMap(),
+    val quality: String? = null,
+    /** 只拿到试听片段（提供方自己也没权限）。 */
+    val trial: Boolean = false,
+)
 
 /* ------------------------------ 一起听总览（账户中心） ------------------------------ */
 

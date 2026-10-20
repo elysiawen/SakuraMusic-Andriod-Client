@@ -2,9 +2,11 @@ package com.sakura.music.ui.components
 
 import android.content.Intent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -13,6 +15,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -20,12 +23,15 @@ import androidx.compose.material.icons.rounded.Devices
 import androidx.compose.material.icons.rounded.Groups
 import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,6 +53,8 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sakura.music.data.room.EntitlementPlatform
+import com.sakura.music.data.room.RoomEntitlement
 import com.sakura.music.data.room.RoomMemberView
 import com.sakura.music.data.room.TogetherOverview
 import com.sakura.music.ui.appContainer
@@ -83,6 +91,8 @@ fun TogetherSheet(
     var busy by remember { mutableStateOf(false) }
     var joinCode by remember { mutableStateOf("") }
     var confirmingEnd by remember { mutableStateOf(false) }
+    // 等待我点头的平台（点「同意」之后才弹风险告知，见下面的 ConfirmDialog）。
+    var confirmingShare by remember { mutableStateOf<String?>(null) }
 
     /*
      * 时长读数的每秒节拍。
@@ -152,13 +162,17 @@ fun TogetherSheet(
 
             val isDuo = room?.isGroup != true
             if (isDuo) {
+                // 用「我这个账号的成员 / 对面那位」而不是 `room.me`：
+                // `me` 是设备级的，旁观设备收到的快照里自己那条也是 false，
+                // 照它画就会把账号席位和对面那位画反。
+                val me = roomSync.myAccountMember()
+                val partner = roomSync.otherMember()
+                val myUserId = me?.userId?.takeIf { it.isNotBlank() }
+
                 DuoBody(
                     code = roomCode,
-                    // 用「我这个账号的成员 / 对面那位」而不是 `room.me`：
-                    // `me` 是设备级的，旁观设备收到的快照里自己那条也是 false，
-                    // 照它画就会把账号席位和对面那位画反。
-                    me = roomSync.myAccountMember(),
-                    partner = roomSync.otherMember(),
+                    me = me,
+                    partner = partner,
                     sessionText = togetherText(
                         remember(tick, room?.togetherSessionSeconds) {
                             roomSync.togetherSessionLiveSeconds()
@@ -170,6 +184,8 @@ fun TogetherSheet(
                     spectator = spectating,
                     seatDeviceName = roomSync.seatDeviceName(),
                     busy = busy,
+                    entitlement = room?.entitlement ?: RoomEntitlement.EMPTY,
+                    myUserId = myUserId,
                     onCopyCode = { copyText(roomCode, "房间码") },
                     onShareInvite = ::shareInvite,
                     onTransfer = {
@@ -179,6 +195,17 @@ fun TogetherSheet(
                             roomSync.join(roomCode)
                             busy = false
                         }
+                    },
+                    onShareChange = { platform, targetUserId ->
+                        roomSync.setEntitlement(platform, targetUserId)
+                        // 选对方只是发起请求：真正要点头的是 TA，别让发起方以为已经生效。
+                        if (targetUserId != null && targetUserId != myUserId) {
+                            onMessage("已发起请求，等待 TA 确认")
+                        }
+                    },
+                    onShareAck = { platform, accept ->
+                        // 同意前先把风险说清楚（借出去的是 TA 的账号）；拒绝直接回给服务端。
+                        if (accept) confirmingShare = platform else roomSync.ackEntitlement(platform, false)
                     },
                 )
             } else {
@@ -238,6 +265,87 @@ fun TogetherSheet(
                 scope.launch { roomSync.dissolve() }
             },
             onDismiss = { confirmingEnd = false },
+        )
+    }
+
+    /*
+     * 借用确认。风险告知放在这一侧，而不是发起方那边：
+     * 被借出去的是 TA 的平台账号，只有 TA 需要真正知情后再点头。
+     */
+    val sharePlatform = confirmingShare
+    if (sharePlatform != null) {
+        ShareRiskDialog(
+            platformLabel = EntitlementPlatform.label(sharePlatform),
+            onConfirm = {
+                confirmingShare = null
+                roomSync.ackEntitlement(sharePlatform, true)
+            },
+            onDismiss = { confirmingShare = null },
+        )
+    }
+}
+
+/**
+ * 「把会员借给 TA」的风险告知。
+ *
+ * 不用通用的 [ConfirmDialog]：一整段话糊在一起时，用户只会扫一眼就点掉。
+ * 这里拆成「一句后果 + 三条短句」，每条只说一件事，扫得动也就真的会被读到。
+ * 取消一律走「取消」而不是「拒绝」——拒绝是卡片上那个按钮，它在服务端有实实在在的语义。
+ */
+@Composable
+private fun ShareRiskDialog(
+    platformLabel: String,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("把${platformLabel}的会员借给 TA？") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(9.dp)) {
+                Text(
+                    text = "同意后，TA 会用你的会员权益播放这一平台的歌。",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                RiskLine(text = "可能违反平台协议，账号被限制或封禁", emphasized = true)
+                RiskLine(text = "TA 的播放会记在你账号的播放记录里")
+                RiskLine(text = "会占用你账号的并发设备数")
+                Text(
+                    text = "随时可以切回「各自」，或退出房间来终止。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onConfirm) {
+                Text("同意共享", color = MaterialTheme.colorScheme.error)
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("取消") }
+        },
+    )
+}
+
+/** 风险条目：小圆点 + 一行短句。 */
+@Composable
+private fun RiskLine(text: String, emphasized: Boolean = false) {
+    Row {
+        Text(
+            text = "·",
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (emphasized) {
+                MaterialTheme.colorScheme.error
+            } else {
+                MaterialTheme.colorScheme.onSurfaceVariant
+            },
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (emphasized) MaterialTheme.colorScheme.error else Color.Unspecified,
         )
     }
 }
@@ -313,9 +421,16 @@ private fun DuoBody(
     spectator: Boolean,
     seatDeviceName: String?,
     busy: Boolean,
+    /** 会员共享的授权关系（按平台）。 */
+    entitlement: RoomEntitlement,
+    myUserId: String?,
     onCopyCode: () -> Unit,
     onShareInvite: () -> Unit,
     onTransfer: () -> Unit,
+    /** 改某平台用谁的会员：null = 各用各的，自己 = 我提供，对方 = 借用（要 TA 确认）。 */
+    onShareChange: (platform: String, targetUserId: String?) -> Unit,
+    /** 我是被借用方时：同意 / 拒绝对方的请求。 */
+    onShareAck: (platform: String, accept: Boolean) -> Unit,
 ) {
     val partnerOnline = partner?.online == true
 
@@ -412,6 +527,20 @@ private fun DuoBody(
             DurationRow(label = "本次", value = sessionText)
             DurationRow(label = "累计", value = totalText)
         }
+
+        /*
+         * 会员共享也只在人齐之后才有意义：一个人时没有「对方的会员」可借，
+         * 摆一排选项只会让人以为哪里坏了。
+         */
+        Spacer(Modifier.height(18.dp))
+        EntitlementSection(
+            entitlement = entitlement,
+            myUserId = myUserId,
+            partnerUserId = partner.userId.takeIf { it.isNotBlank() },
+            partnerName = partner.nickname.takeIf { it.isNotBlank() } ?: "TA",
+            onChoose = onShareChange,
+            onAck = onShareAck,
+        )
     }
 }
 
@@ -620,6 +749,199 @@ private fun DurationRow(label: String, value: String) {
             style = MaterialTheme.typography.titleSmall,
             color = MaterialTheme.colorScheme.primary,
         )
+    }
+}
+
+/* ------------------------------ 会员共享 ------------------------------ */
+
+/**
+ * 会员共享：两个平台各一行三选一。
+ *
+ * 三档与服务端 `setEntitlement` 的语义一一对应：
+ * - 「各自」→ owner 为 null，撤销不需要对方同意；
+ * - 「用我的」→ 我把自己的会员借出去，自己已经有这个意向，直接生效；
+ * - 「用 TA 的」→ 只是**发起请求**，必须 TA 本人确认后才生效（见 [onAck] 与确认弹层）。
+ *
+ * 「会员」是平台账号的属性，不代表任意歌曲都能播（数字专辑、独家内容不随会员解锁），
+ * 所以这里不承诺「选了就一定放得出来」。
+ */
+@Composable
+private fun EntitlementSection(
+    entitlement: RoomEntitlement,
+    myUserId: String?,
+    partnerUserId: String?,
+    partnerName: String,
+    onChoose: (String, String?) -> Unit,
+    onAck: (String, Boolean) -> Unit,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = "会员共享",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+
+        EntitlementPlatform.ALL.forEach { platform ->
+            val owner = entitlement.ownerOf(platform)
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = EntitlementPlatform.label(platform),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                SegmentControl(
+                    options = listOf("各自", "用我的", "用 TA 的"),
+                    selected = when {
+                        owner == null -> 0
+                        myUserId != null && owner == myUserId -> 1
+                        else -> 2
+                    },
+                    enabled = { index ->
+                        when (index) {
+                            0 -> true
+                            1 -> myUserId != null
+                            else -> myUserId != null && partnerUserId != null
+                        }
+                    },
+                    onSelect = { index ->
+                        onChoose(
+                            platform,
+                            when (index) {
+                                1 -> myUserId
+                                2 -> partnerUserId
+                                else -> null
+                            },
+                        )
+                    },
+                )
+            }
+        }
+
+        // 需要我点头的：对方想用我的会员。全块唯一要动手的地方，给块底色别混进文字里。
+        EntitlementPlatform.ALL.forEach { platform ->
+            val pending = entitlement.pendingOf(platform) ?: return@forEach
+            if (myUserId == null || pending.targetUserId != myUserId) return@forEach
+            ShareRequestCard(
+                text = "$partnerName 想用你的${EntitlementPlatform.label(platform)}会员",
+                onAccept = { onAck(platform, true) },
+                onDecline = { onAck(platform, false) },
+            )
+        }
+
+        /*
+         * 一行状态说明，只留**必须说**的两句：等待对方确认（功能性的），
+         * 以及「你的播放会被记账」（合规性的）。「正在借用中」不在这里重复——
+         * 起播时那份提示已经说过一次了。
+         */
+        val waiting = EntitlementPlatform.ALL.filter { platform ->
+            val pending = entitlement.pendingOf(platform)
+            myUserId != null && pending != null && pending.requestedBy == myUserId
+        }
+        val sharing = EntitlementPlatform.ALL.filter { platform ->
+            myUserId != null && entitlement.ownerOf(platform) == myUserId
+        }
+        val status = when {
+            waiting.isNotEmpty() ->
+                "已发出请求，等 TA 确认：${waiting.joinToString("、") { EntitlementPlatform.label(it) }}"
+
+            sharing.isNotEmpty() -> "TA 的播放会记在你的账号下"
+            else -> ""
+        }
+        if (status.isNotEmpty()) {
+            Text(
+                text = status,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+/** 三选一的小分段控件（各自 / 用我的 / 用 TA 的）。 */
+@Composable
+private fun SegmentControl(
+    options: List<String>,
+    selected: Int,
+    enabled: (Int) -> Boolean,
+    onSelect: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+            .padding(3.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        options.forEachIndexed { index, label ->
+            val on = index == selected
+            val usable = enabled(index)
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(if (on) MaterialTheme.colorScheme.primary else Color.Transparent)
+                    .clickable(enabled = usable && !on) { onSelect(index) }
+                    .padding(vertical = 7.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = when {
+                        on -> MaterialTheme.colorScheme.onPrimary
+                        usable -> MaterialTheme.colorScheme.onSurfaceVariant
+                        // 不可用也写出来、只是压灰：这一档存在，只是现在没人可选。
+                        else -> MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f)
+                    },
+                    maxLines = 1,
+                )
+            }
+        }
+    }
+}
+
+/** 「TA 想用你的会员」那一条 + 同意 / 拒绝。 */
+@Composable
+private fun ShareRequestCard(
+    text: String,
+    onAccept: () -> Unit,
+    onDecline: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.medium)
+            .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.10f))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+    ) {
+        Text(text = text, style = MaterialTheme.typography.bodySmall)
+        Spacer(Modifier.height(10.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MiniButton(text = "同意", primary = true, onClick = onAccept)
+            MiniButton(text = "拒绝", primary = false, onClick = onDecline)
+        }
+    }
+}
+
+/** 卡片里的小按钮：52dp 的 PrimaryButton 在这一行里太占地方。 */
+@Composable
+private fun MiniButton(text: String, primary: Boolean, onClick: () -> Unit) {
+    val padding = PaddingValues(horizontal = 16.dp)
+    if (primary) {
+        Button(onClick = onClick, modifier = Modifier.height(32.dp), contentPadding = padding) {
+            Text(text, style = MaterialTheme.typography.labelMedium)
+        }
+    } else {
+        OutlinedButton(
+            onClick = onClick,
+            modifier = Modifier.height(32.dp),
+            contentPadding = padding,
+        ) {
+            Text(text, style = MaterialTheme.typography.labelMedium)
+        }
     }
 }
 

@@ -2,6 +2,7 @@ package com.sakura.music.core.player
 
 import android.os.SystemClock
 import com.sakura.music.data.connect.ConnectClient
+import com.sakura.music.data.connect.ConnectOutcome
 import com.sakura.music.data.connect.toUnifiedTrack
 import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.data.prefs.PlayMode
@@ -10,24 +11,38 @@ import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.data.room.RoomCodeStore
 import com.sakura.music.data.room.RoomEnvelope
+import com.sakura.music.data.room.RoomEntitlement
+import com.sakura.music.data.room.RoomEntitlementPending
 import com.sakura.music.data.room.RoomMemberView
 import com.sakura.music.data.room.RoomPlayback
 import com.sakura.music.data.room.RoomStreamEvent
 import com.sakura.music.data.room.RoomView
+import com.sakura.music.data.room.SharedSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.encodeToJsonElement
 import kotlinx.serialization.json.put
 import kotlin.math.abs
+
+/**
+ * 把席位交给另一台设备时等多久算「没接过去」。
+ *
+ * 目标是对方设备收到指令后发一次 join 请求，局域网下通常一两百毫秒就回来了；
+ * 留到 6 秒是为了容忍移动网络和后台上被叫醒的延迟，又不至于让人一直盯着没反应的界面。
+ */
+private const val SEAT_HANDOFF_TIMEOUT_MS = 6_000L
 
 /**
  * 「一起听」房间的客户端。
@@ -83,6 +98,14 @@ class RoomSync(
 
     /** 房间快照：成员、队列、一起听时长。null = 还没收到快照。 */
     val room: StateFlow<RoomView?> = _room.asStateFlow()
+
+    /**
+     * 会员归属变化时的回调。由容器接上，用来作废播放地址缓存——
+     * 不清的话，切回「各自」之后还会拿上一次借来的地址重播。
+     *
+     * 退房也算一次变化（共享关系随房间一起结束），见 [clearRoom] / [clearSpectating]。
+     */
+    var onEntitlementChanged: (() -> Unit)? = null
 
     private val _playbackState = MutableStateFlow<RoomPlayback?>(null)
 
@@ -315,6 +338,39 @@ class RoomSync(
         _notice.value = "已结束一起听"
     }
 
+    /**
+     * 同账号的另一台设备在设备面板上点了「让声音切到这台」：把席位接过来。
+     *
+     * 走的就是 [reclaim]——和冷启动接回席位同一条路：先收起本机现场，再 `join` 接席位，
+     * 然后由房间队列接管播放器。不额外提示：房间随即开始播，本身就是反馈。
+     *
+     * 只有**旁观**设备会收到这条：正在放的席位设备不需要、也不会被要求接自己的席位。
+     */
+    fun takeSeatHere() {
+        // 只有旁观设备需要接：正在放的那台收到这条也没有意义。
+        if (!_spectating.value) return
+        val roomCode = _code.value ?: return
+        scope.launch { reclaim(roomCode) }
+    }
+
+    /**
+     * 请另一台设备接走席位，并等它**真的接上**。
+     *
+     * 指令只保证「送达」（网关收了、推出去了）；真正接席位是那台设备自己去 `join`。
+     * 所以这里盯的是**房间状态**：我账号的席位换到它身上才算数。
+     *
+     * 换句话说不看回执、看结果——设备离线、连接半死、界面正忙，都会在超时后落到
+     * false，界面据此说「没接过去」，而不是发完就报成功。
+     */
+    suspend fun handSeatTo(deviceId: String): Boolean {
+        if (following.takeSeat(deviceId) != ConnectOutcome.Delivered) return false
+        return withTimeoutOrNull(SEAT_HANDOFF_TIMEOUT_MS) {
+            room.first { view ->
+                view?.members?.any { it.mine && it.deviceId == deviceId } == true
+            }
+        } != null
+    }
+
     /** 退出登录：断开房间语义（不通知服务端、也不恢复现场）。 */
     fun stop() {
         val wasSeat = seatActive
@@ -399,6 +455,108 @@ class RoomSync(
         act(ACTION_SET_MODE, buildJsonObject { put(FIELD_MODE, PlayMode.wireOf(mode)) })
     }
 
+    /* ------------------------------ 会员共享 ------------------------------ */
+
+    /**
+     * 改某平台的会员共享归属。
+     *
+     * - `targetUserId = null`：回到「各用各的」（撤销不需要对方同意）
+     * - 传自己的 userId：直接分享
+     * - 传对方：只是**发起请求**，要等对方 [ackEntitlement] 之后才生效
+     *
+     * 不做本地乐观更新：生效一律以服务端下发的 `room-entitlement` 为准，
+     * 否则「等待对方确认」会被界面先显示成已生效。
+     */
+    fun setEntitlement(platform: String, targetUserId: String?) {
+        act(
+            ACTION_SET_ENTITLEMENT,
+            buildJsonObject {
+                put(FIELD_PLATFORM, platform)
+                if (targetUserId == null) {
+                    put(FIELD_TARGET_USER_ID, JsonNull)
+                } else {
+                    put(FIELD_TARGET_USER_ID, targetUserId)
+                }
+            },
+        )
+    }
+
+    /** 权益提供方确认（`accept = true`）或拒绝一次共享请求。 */
+    fun ackEntitlement(platform: String, accept: Boolean) {
+        act(
+            ACTION_ACK_ENTITLEMENT,
+            buildJsonObject {
+                put(FIELD_PLATFORM, platform)
+                put(FIELD_ACCEPT, accept)
+            },
+        )
+    }
+
+    /** 这一平台当前用谁的权益；null = 各用各的。 */
+    fun entitlementOwner(platform: String): String? =
+        _room.value?.entitlement?.ownerOf(platform)?.takeIf { it.isNotBlank() }
+
+    /** 本机账号是不是这一平台的权益提供方。 */
+    fun isEntitlementProvider(platform: String): Boolean {
+        val myId = myAccountMember()?.userId?.takeIf { it.isNotBlank() } ?: return false
+        return entitlementOwner(platform) == myId
+    }
+
+    /** 这一平台是不是在借**别人**的权益（是的话返回对方的 userId）。 */
+    fun borrowingFrom(platform: String): String? {
+        val owner = entitlementOwner(platform) ?: return null
+        val myId = myAccountMember()?.userId
+        return owner.takeIf { it != myId }
+    }
+
+    /**
+     * 为播放器取一条「对方会员」的地址。
+     *
+     * 返回 null 就走正常解析（自己的账号）。只有同时满足三条才会真的去请求：
+     * 本机占着席位、这一平台在借别人的会员、曲目正是房间**当前**这首
+     * ——服务端也只认当前曲目，别的请求会被 400 挡掉。
+     */
+    suspend fun fetchSharedSource(request: PlayRequest): SharedSource? {
+        if (!seatActive) return null
+        val platform = request.platform.id
+        if (borrowingFrom(platform) == null) return null
+
+        /*
+         * 服务端要两样东西：房间当前曲目的**键**（必须是它自己那份），以及这次请求
+         * 落在这一平台上的**源 id**（它拿 `sources` 反查，见 `sharedSourceTarget`）。
+         * 所以键取自房间、平台与 id 取自这次真正要播的音源——用户在房间里切过音源时，
+         * 两者未必是同一个平台。
+         */
+        val track = _playbackState.value?.track ?: return null
+        val source = track.sources.firstOrNull { it.platform == platform }
+        val isCurrentTrack = if (source != null) {
+            source.id == request.id
+        } else {
+            // 老网关不带 sources：退回按键比对（房间的键就是 `平台:id`）。
+            track.key == "$platform:${request.id}"
+        }
+        if (!isCurrentTrack) return null
+
+        return runCatching {
+            api.fetchRoomSource(
+                deviceId = client.deviceId,
+                platform = platform,
+                trackKey = track.key,
+                quality = request.quality.id,
+            )
+        }.onFailure {
+            // 「对方没把凭据放服务器」这类错误必须说给用户听，否则只会看到歌被跳过。
+            _notice.value = it.friendlyMessage()
+        }.getOrNull()
+    }
+
+    /** 需要**我**点头的共享请求（对方要用我的会员）。 */
+    fun entitlementRequestFor(platform: String): RoomEntitlementPending? {
+        val pending = _room.value?.entitlement?.pendingOf(platform) ?: return null
+        val myId = myAccountMember()?.userId ?: return null
+        return pending.takeIf { it.targetUserId == myId }
+    }
+
     /* ------------------------------ 时长 / 进度读数 ------------------------------ */
 
     /**
@@ -471,7 +629,24 @@ class RoomSync(
             is RoomStreamEvent.Reconnected -> scope.launch { reconcileRoom() }
             is RoomStreamEvent.Snapshot -> applyRoom(event.envelope)
             is RoomStreamEvent.Playback -> applyPlayback(event.state)
+            is RoomStreamEvent.Entitlement -> applyEntitlement(event.state)
         }
+    }
+
+    /**
+     * 会员共享的授权状态变化。
+     *
+     * 服务端只推**授权关系**，不推地址：真正取流时由受方自己去 `POST /api/rooms/source`
+     * 要一条（见 [PlaybackResolver]）。所以这里只更新状态，**不打断当前播放**——
+     * 正在放的那首继续放，下一次起播自然按新归属走。
+     */
+    private fun applyEntitlement(state: RoomEntitlement) {
+        val current = _room.value ?: return
+        _room.value = current.copy(
+            entitlement = RoomEntitlement(active = state.active, pending = state.pending),
+        )
+        // 归属变了，之前那条地址（可能是借来的）不能再被复用。
+        onEntitlementChanged?.invoke()
     }
 
     private fun applyRoom(envelope: RoomEnvelope) {
@@ -788,6 +963,8 @@ class RoomSync(
         restorePersonal()
         failedKey = null
         queueDirty = true
+        // 播放已搬到另一台设备：缓存在这里的借来地址没有理由再留着。
+        onEntitlementChanged?.invoke()
         _spectating.value = true
         _code.value?.let { store.save(it, seat = false) }
     }
@@ -803,6 +980,8 @@ class RoomSync(
         _spectating.value = false
         _room.value = null
         _playbackState.value = null
+        // 已经不在共享关系里了：缓存里那些借来的地址不能留给下一次单播。
+        onEntitlementChanged?.invoke()
     }
 
     /**
@@ -900,6 +1079,8 @@ class RoomSync(
         togetherSyncedAt = 0L
         failedKey = null
         queueDirty = true
+        // 房间没了，共享关系也随之结束：借来的地址不该跟着回到个人播放里。
+        onEntitlementChanged?.invoke()
         // 收尾：留着调速会得到一个「莫名快慢几个百分点」的播放器。
         playback.resetPlaybackSpeed()
         playback.setRoomPlayMode(false)
@@ -999,6 +1180,8 @@ class RoomSync(
         const val ACTION_REMOVE = "remove"
         const val ACTION_SET_QUEUE = "setQueue"
         const val ACTION_SET_MODE = "setMode"
+        const val ACTION_SET_ENTITLEMENT = "setEntitlement"
+        const val ACTION_ACK_ENTITLEMENT = "ackEntitlement"
         const val ACTION_ENDED = "ended"
         const val ACTION_UNPLAYABLE = "unplayable"
 
@@ -1008,6 +1191,9 @@ class RoomSync(
         const val FIELD_TRACK_KEY = "trackKey"
         const val FIELD_QUEUE = "queue"
         const val FIELD_MODE = "mode"
+        const val FIELD_PLATFORM = "platform"
+        const val FIELD_TARGET_USER_ID = "targetUserId"
+        const val FIELD_ACCEPT = "accept"
 
         const val SKIP_UNPLAYABLE = "unplayable"
     }

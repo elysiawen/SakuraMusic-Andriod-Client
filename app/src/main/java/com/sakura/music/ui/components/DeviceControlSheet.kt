@@ -92,6 +92,8 @@ fun DeviceControlSheet(
     val devices by container.connectClient.devices.collectAsStateWithLifecycle()
     val playback by container.playbackCenter.state.collectAsStateWithLifecycle()
     val following by container.connectSync.following.collectAsStateWithLifecycle()
+    // 房间快照：只为了认出「我账号的席位在哪台设备上」，见下面的只读判断。
+    val room by container.roomSync.room.collectAsStateWithLifecycle()
 
     // 取实时状态而不是打开那一刻的快照：对方一直在放，界面得跟着走。
     val device = devices.firstOrNull { it.deviceId == deviceId }
@@ -108,6 +110,22 @@ fun DeviceControlSheet(
     val isSelf = device.deviceId == selfId
     val state = device.state
     val track = state?.track
+
+    /*
+     * 一起听占着席位的设备是**只读**的：它放的是房间的歌，对面发来的遥控会被它直接拒掉
+     * （见 `ConnectSync.roomSeat`）。所以这里先把控件收掉，别让用户按下去却毫无反应。
+     *
+     * 反过来照旧可以遥控不在席位上的设备：那是它自己的播放，与房间无关。
+     */
+    val roomSeatId = room?.let { container.roomSync.myAccountMember()?.deviceId }
+    val readOnly = roomSeatId != null && device.deviceId == roomSeatId
+
+    /*
+     * 房间进行中，这块面板只剩一件事：**决定声音从哪台设备出**（见末尾那一行）。
+     * 内容控制归房间；投放 / 接管 / 跟随改的都是"谁在放"，房间里用它们只会得到
+     * 一份副本播放，然后被房间的镜像拉回去。
+     */
+    val inRoom = room != null
 
     // 每秒重算一次对方进度。
     var now by remember { mutableLongStateOf(container.connectClient.serverTimeNow) }
@@ -129,6 +147,10 @@ fun DeviceControlSheet(
      */
     var seekDraft by remember(device.deviceId) { mutableStateOf<SliderDraft?>(null) }
     var volumeDraft by remember(device.deviceId) { mutableStateOf<SliderDraft?>(null) }
+    // 「让声音切到这台」在途：指令已发出、等对方接上。期间不让人连点。
+    var handingOver by remember(device.deviceId) { mutableStateOf(false) }
+    // 投放 / 接管在途：两者都要等一次往返（3.5 秒 / 5 秒），期间同样不让人连点。
+    var movingPlayback by remember(device.deviceId) { mutableStateOf(false) }
 
     // 等回执：只是本地数值比较，不发任何请求。
     LaunchedEffect(device.deviceId) {
@@ -227,15 +249,20 @@ fun DeviceControlSheet(
                 return@Column
             }
 
-            if (state == null || track == null) {
-                Spacer(Modifier.height(14.dp))
+            if (readOnly) {
+                // 内容控制全收掉，只留音量——那是设备的属性，不是播放内容的。
+                Spacer(Modifier.height(12.dp))
                 Text(
-                    text = "这台设备没有在放东西。可以把本机的播放交给它，或让它跟随本机。",
+                    text = "这台正在放一起听的歌，播放归房间统一管——这里只剩音量。" +
+                        "要切歌、拖进度，去「一起听」面板。",
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(horizontal = 24.dp),
                 )
-            } else {
+            }
+
+            // 条件写成「正向」的：progress 里要拿 state/track 当非空用，只能这样才智能转换。
+            if (!readOnly && state != null && track != null) {
                 /* ------------------------------ 进度 ------------------------------ */
                 // 进度只能绑在「它手里有东西」上：没内容就没有进度可言。
                 val durationSec = state.duration.toFloat().coerceAtLeast(0f)
@@ -277,6 +304,14 @@ fun DeviceControlSheet(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
+            } else if (!readOnly) {
+                Spacer(Modifier.height(14.dp))
+                Text(
+                    text = "这台设备没有在放东西。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp),
+                )
             }
 
             /*
@@ -321,6 +356,9 @@ fun DeviceControlSheet(
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
+
+            // 房间里内容控制归房间：进度、切歌、模式全收掉，只留上面那行音量。
+            if (readOnly) return@Column
 
             /* ------------------------------ 传输控制 ------------------------------ */
             // 模式是设备自己的状态：下发后等下一轮 devices 广播回填。
@@ -529,32 +567,82 @@ fun DeviceControlSheet(
             /* ------------------------------ 交接 ------------------------------ */
             Spacer(Modifier.height(14.dp))
 
-            if (playback.queue.isNotEmpty()) {
+            if (inRoom) {
+                /*
+                 * 房间里这块只剩一件事：**把声音切到那台**。
+                 *
+                 * 投放 / 接管 / 跟随改的都是「谁在放」，而房间期间这件事只有一条路——
+                 * 让目标设备接走席位：它自己 join 接过来，服务端随之把上一台降级为旁观。
+                 * 走设备互控那条老路只会得到一份副本播放，然后被房间的镜像拉回去。
+                 */
+                ControlRow(
+                    icon = Icons.Rounded.Cast,
+                    title = "让声音切到这台",
+                    subtitle = if (handingOver) {
+                        "正在切换…"
+                    } else {
+                        "把一起听的播放转到它，本机改为只看"
+                    },
+                    enabled = !handingOver,
+                    onClick = {
+                        handingOver = true
+                        scope.launch {
+                            /*
+                             * 等它真的接上再报成功：这条指令只保证「送到」，
+                             * 接席位是那台设备自己去 join。没接过去就如实说没反应，
+                             * 否则用户会盯着一个还在放自己歌的设备以为切过去了。
+                             */
+                            val handed = container.roomSync.handSeatTo(device.deviceId)
+                            handingOver = false
+                            if (handed) {
+                                onMessage("声音已切到「${device.name}」")
+                                onDismiss()
+                            } else {
+                                onMessage("「${device.name}」没有接过去，可能已离线或没响应")
+                            }
+                        }
+                    },
+                )
+            } else if (playback.queue.isNotEmpty()) {
                 ControlRow(
                     icon = Icons.Rounded.Cast,
                     title = "投放到这台设备",
-                    subtitle = "把本机正在播的队列连进度交给它，本机停下",
+                    subtitle = if (movingPlayback) {
+                        "正在投放…"
+                    } else {
+                        "把本机正在播的队列连进度交给它，本机停下"
+                    },
+                    enabled = !movingPlayback,
                     onClick = {
+                        movingPlayback = true
                         scope.launch {
                             val result = container.connectSync.transferTo(device.deviceId)
+                            movingPlayback = false
                             onMessage(transferMessage(device.name, result))
                         }
                     },
                 )
             }
 
-            // 接管需要它手里确实有东西可搬。
-            if (track != null) {
+            // 接管需要它手里确实有东西可搬；房间里同理不开放，见 [inRoom]。
+            if (track != null && !inRoom) {
                 ControlRow(
                     icon = Icons.Rounded.Devices,
                     title = "接管它的播放",
-                    subtitle = "把它手里的队列搬到本机来放",
+                    subtitle = if (movingPlayback) "正在接管…" else "把它手里的队列搬到本机来放",
+                    enabled = !movingPlayback,
                     onClick = {
+                        movingPlayback = true
                         scope.launch {
                             val result = container.connectSync.requestTakeOver(device.deviceId)
+                            movingPlayback = false
                             onMessage(
+                                // 这是往返：队列真的回来了才算接管成功。
                                 when (result) {
-                                    AckResult.Delivered -> "已请求接管，稍后本机开始播放"
+                                    AckResult.Delivered -> "已接管「${device.name}」的播放"
+                                    AckResult.NoResponse ->
+                                        "「${device.name}」没有把播放交过来，可能已离线"
+
                                     AckResult.Offline -> "「${device.name}」可能已离线"
                                     else -> "请求没发出去，检查一下网络"
                                 }
@@ -610,6 +698,15 @@ fun DeviceControlSheet(
                     },
                 )
 
+                // 房间里不新开跟随：跟随与房间互斥（两者都在驱动同一个播放器）。
+                // 上两档的「停止」照旧保留——已经跟上的必须留一条脱身的路。
+                inRoom -> Text(
+                    text = "一起听期间不和其他设备同步——播放由房间统一决定。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 6.dp),
+                )
+
                 else -> {
                     // 「跟随这台设备」要它手上有内容：镜像一个空的东西没有意义。
                     if (track != null) {
@@ -649,12 +746,13 @@ private fun ControlRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
+    enabled: Boolean = true,
     onClick: () -> Unit,
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 24.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -809,7 +907,8 @@ private fun sendFailure(name: String, outcome: ConnectOutcome): String = when (o
 /** 投放的结果。语气留余地：对方执行了但状态上报恰好失败时，也会走到「没响应」。 */
 private fun transferMessage(name: String, result: AckResult): String = when (result) {
     AckResult.Delivered -> "已投放到「$name」"
-    AckResult.NoResponse -> "已发送，「$name」可能没有响应"
+    // 没送出去时 [ConnectSync.transferTo] 已经把本机恢复成原样，这里得说出来。
+    AckResult.NoResponse -> "「$name」没有接过去，已恢复本机播放"
     AckResult.Offline -> "「$name」可能已离线"
     AckResult.Failed -> "没发出去，检查一下网络"
 }

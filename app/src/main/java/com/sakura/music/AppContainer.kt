@@ -402,6 +402,11 @@ class AppContainer(private val appContext: Context) {
             settings = settings,
             json = json,
             scope = scope,
+            // 占着一起听席位时本机对遥控只读：放的是房间的歌，谁也别来动它。
+            // 单向即可——这台自己照样能遥控别的设备（见 `DeviceControlSheet`）。
+            roomSeat = { roomSync.seatActive },
+            // 设备面板上的「让声音切到这台」：本机是旁观时把席位接过来。
+            onTakeSeat = { roomSync.takeSeatHere() },
         )
     }
 
@@ -431,6 +436,10 @@ class AppContainer(private val appContext: Context) {
             // 接上播放意图转交口：房间里「点一首歌 / 播放全部」要变成房间操作，
             // 否则本地会先响起来，200 毫秒后又被镜像装回房间那一份。
             playbackCenter.roomBridge = sync
+            // 借来的会员地址优先于自己的解析：对方有会员、我没有时，正常解析只会拿到试听。
+            playbackResolver.sharedSourceProvider = sync::fetchSharedSource
+            // 归属一变（借 / 还 / 对方撤销），之前缓存的地址就不能再用了。
+            sync.onEntitlementChanged = { playbackResolver.invalidateAll() }
         }
     }
 

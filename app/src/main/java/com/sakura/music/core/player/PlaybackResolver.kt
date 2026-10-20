@@ -1,10 +1,12 @@
 package com.sakura.music.core.player
 
+import com.sakura.music.data.model.DirectStream
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.PlayResolveResult
 import com.sakura.music.data.prefs.RoutePreference
 import com.sakura.music.data.prefs.SettingsStore
 import com.sakura.music.data.remote.SakuraApi
+import com.sakura.music.data.room.SharedSource
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -150,6 +152,24 @@ class PlaybackResolver(
         scope.launch { settings.forgetProxyOnly(platform) }
     }
 
+    /**
+     * 这条结果是不是**只能直连**。
+     *
+     * 借对方会员解析出来的地址是个绝对 CDN 直链，必须带着提供方那套防盗链头去开；
+     * 网关代理那边根本没有它的令牌。网关自己给的 `url` 永远是相对路径，
+     * 所以「绝对地址」= 共享地址，两者一眼能分开。
+     */
+    fun isDirectOnly(url: String): Boolean =
+        url.startsWith("http://") || url.startsWith("https://")
+
+    /**
+     * 这条结果实际会走直连吗（界面上的路由标记用它，才和真正的取流路径对得上）。
+     *
+     * 共享地址不受用户的连接方式约束：它没有代理那条退路，只能直连。
+     */
+    fun willUseDirect(result: PlayResolveResult, platform: Platform): Boolean =
+        result.direct != null && (isDirectOnly(result.url) || mayUseDirect(platform))
+
     /** 拼出网关代理的绝对地址——响应里的 `url` 是相对路径。 */
     fun proxyUrl(result: PlayResolveResult): String {
         val base = baseUrlProvider().trim().trimEnd('/')
@@ -177,8 +197,37 @@ class PlaybackResolver(
         cache.remove(request.cacheKey)
     }
 
+    /** 一起听的会员归属变了：所有缓存作废，下一次起播按新归属重新解析。 */
+    fun invalidateAll() {
+        cache.clear()
+    }
+
+    /**
+     * 会员共享的地址来源。
+     *
+     * 由房间注入：只有「我在借对方的会员」且这首正是房间在播的那首时，才会真的返回地址。
+     * 返回 null 就走正常解析（自己的账号）。
+     */
+    var sharedSourceProvider: (suspend (PlayRequest) -> SharedSource?)? = null
+
     suspend fun resolve(request: PlayRequest): PlayResolveResult {
-        val result = api.resolvePlay(request.platform, request.id, request.quality)
+        /*
+         * 共享优先：对方有会员、我没有，正常解析只会拿到试听或直接失败。
+         * 这条地址是服务端用对方的凭据解析好的——这里只是换一个下载地址，
+         * 凭据全程不经过客户端。
+         */
+        val shared = runCatching { sharedSourceProvider?.invoke(request) }.getOrNull()
+        val result = if (shared != null && shared.url.isNotBlank()) {
+            PlayResolveResult(
+                url = shared.url,
+                quality = request.quality.id,
+                actualQuality = shared.quality.orEmpty(),
+                trial = shared.trial,
+                direct = DirectStream(url = shared.url, headers = shared.headers),
+            )
+        } else {
+            api.resolvePlay(request.platform, request.id, request.quality)
+        }
         cache[request.cacheKey] = Entry(result, System.currentTimeMillis())
         return result
     }

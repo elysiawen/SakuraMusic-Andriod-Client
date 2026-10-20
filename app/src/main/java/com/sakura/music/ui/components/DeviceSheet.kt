@@ -53,6 +53,12 @@ fun DeviceSheet(
     val connected by container.connectClient.connected.collectAsStateWithLifecycle()
     val devices by container.connectClient.devices.collectAsStateWithLifecycle()
     val selfId = container.connectClient.deviceId
+    /*
+     * 一起听期间「哪台在放房间的歌」。标出来的用处：它是唯一只读的设备，
+     * 也是唯一不该出现「让声音切到这台」的设备——用户点进去之前就该知道。
+     */
+    val room by container.roomSync.room.collectAsStateWithLifecycle()
+    val roomSeatId = room?.let { container.roomSync.myAccountMember()?.deviceId }
 
     var controlTarget by remember { mutableStateOf<String?>(null) }
 
@@ -90,6 +96,7 @@ fun DeviceSheet(
                 DeviceRow(
                     device = device,
                     isSelf = device.deviceId == selfId,
+                    inRoomSeat = device.deviceId == roomSeatId,
                     followsSelf = device.state?.following == selfId,
                     serverNow = now,
                     onClick = { controlTarget = device.deviceId },
@@ -112,6 +119,8 @@ fun DeviceSheet(
 private fun DeviceRow(
     device: DeviceView,
     isSelf: Boolean,
+    /** 这台设备正在放一起听的歌（房间的席位在它身上）。 */
+    inRoomSeat: Boolean,
     /** 这台设备正在跟随本机（靠它上报的 `following` 判断）。 */
     followsSelf: Boolean,
     serverNow: Long,
@@ -160,9 +169,11 @@ private fun DeviceRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(
                 text = when {
+                    isSelf && inRoomSeat -> "${device.name}（本机 · 一起听）"
                     isSelf -> "${device.name}（本机）"
                     // 「谁跟着谁」得让被跟随的一方能确认：光看都在放同一首歌，
                     // 分不清是跟着走还是各放各的。
+                    inRoomSeat -> "${device.name}（一起听）"
                     followsSelf -> "${device.name}（正在跟随本机）"
                     else -> device.name
                 },

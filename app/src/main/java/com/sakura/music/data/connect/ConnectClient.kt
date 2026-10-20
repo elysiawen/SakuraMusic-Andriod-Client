@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import com.sakura.music.data.remote.ApiException
 import com.sakura.music.data.room.RoomEnvelope
+import com.sakura.music.data.room.RoomEntitlement
 import com.sakura.music.data.room.RoomPlayback
 import com.sakura.music.data.room.RoomStreamEvent
 import kotlinx.serialization.Serializable
@@ -238,6 +239,14 @@ class ConnectClient(
                         syncClock(it.serverNow)
                         _roomEvents.tryEmit(RoomStreamEvent.Playback(it, it.serverNow))
                     }
+
+                // 会员共享的授权状态（发起 / 确认 / 拒绝 / 撤销）。同样是全量，直接替换本地那份。
+                "room-entitlement" ->
+                    runCatching { json.decodeFromString(RoomEntitlement.serializer(), data) }
+                        .onSuccess {
+                            syncClock(it.serverNow)
+                            _roomEvents.tryEmit(RoomStreamEvent.Entitlement(it, it.serverNow))
+                        }
             }
         }
 

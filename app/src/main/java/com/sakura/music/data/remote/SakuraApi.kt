@@ -36,9 +36,11 @@ import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.data.model.UserResponse
 import com.sakura.music.data.room.CreateRoomBody
 import com.sakura.music.data.room.DeviceIdBody
+import com.sakura.music.data.room.FetchSourceBody
 import com.sakura.music.data.room.JoinRoomBody
 import com.sakura.music.data.room.RoomCodeResponse
 import com.sakura.music.data.room.RoomPreview
+import com.sakura.music.data.room.SharedSource
 import com.sakura.music.data.room.TogetherOverview
 import com.sakura.music.data.room.TogetherPartnerDetail
 import kotlinx.serialization.json.Json
@@ -505,6 +507,33 @@ class SakuraApi(
                 payload?.let { put("payload", it) }
             },
         )
+
+    /**
+     * 借对方的会员取一条播放地址。
+     *
+     * 解析在**服务端**完成：它拿权益提供方存在服务器上的凭据换出 CDN 直链，
+     * 本机只拿到地址，全程不接触凭据。对方用「仅本机」凭据时服务端拿不到，
+     * 会返回 `credential_not_on_server`，调用方据此提示用户改设置。
+     */
+    suspend fun fetchRoomSource(
+        deviceId: String,
+        platform: String,
+        trackKey: String,
+        quality: String,
+    ): SharedSource = client.request(
+        method = "POST",
+        path = "/api/rooms/source",
+        deserializer = SharedSource.serializer(),
+        body = json.encodeToJsonElement(
+            FetchSourceBody.serializer(),
+            FetchSourceBody(
+                deviceId = deviceId,
+                platform = platform,
+                trackKey = trackKey,
+                quality = quality,
+            ),
+        ),
+    )
 
     /**
      * 入房前的预览（也用来对账「这个房间还在不在」）。

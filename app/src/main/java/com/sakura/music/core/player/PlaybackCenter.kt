@@ -1001,8 +1001,8 @@ class PlaybackCenter(
         runCatching { resolver.resolve(request) }
             .onSuccess { result ->
                 // 和 SakuraDataSource 用同一个判断：锁了「中转」就别预告直连，
-                // 锁了「直连」也别因为历史记录就预告中转。
-                val willBeDirect = result.direct != null && resolver.mayUseDirect(source.platform)
+                // 锁了「直连」也别因为历史记录就预告中转；共享地址只能直连，也算在里面。
+                val willBeDirect = resolver.willUseDirect(result, source.platform)
                 // 还没开流的时候（比如刚恢复的现场）先把预解析的结论显示出来，
                 // 真连上游或命中缓存时会有更准的结果盖掉它。
                 routeTracker.reportExpected(

@@ -67,9 +67,16 @@ class SakuraDataSource(
         var retriedAfterTokenExpiry = false
 
         while (true) {
-            // 1) 直连（用户的连接方式允许时）。
+            /*
+             * 借对方会员解析出来的地址是**绝对 CDN 直链**：必须带着提供方那套防盗链头去开。
+             * 网关那条 `/api/stream` 代理认不了它（没有对应令牌），所以这类地址只有直连一条路——
+             * 退回去就是一次不带头的裸请求，必然被防盗链挡掉，还不如把真实原因抛出去。
+             */
+            val directOnly = resolver.isDirectOnly(resolved.url)
+
+            // 1) 直连（用户的连接方式允许时；只能直连的地址不受这个约束）。
             val direct = if (triedDirect) null else resolver.directOf(resolved)
-            if (direct != null && resolver.mayUseDirect(request.platform)) {
+            if (direct != null && (directOnly || resolver.mayUseDirect(request.platform))) {
                 triedDirect = true
                 val (url, headers) = direct
                 // 直连自己先多试几次：CDN 的连接抖动、某个节点抽风都值得**就地**再试，
@@ -91,12 +98,18 @@ class SakuraDataSource(
                     val slow = SystemClock.elapsedRealtime() - startedAt > DIRECT_RETRY_MAX_WAIT_MS
                     if (refused || slow) break
                 }
-                // 把失败原因一并交出去：4xx 是防盗链的明确拒绝，值得记账；
-                // 连不上、超时这类可能只是这一次不走运，不该让平台被永久钉在中转上。
-                resolver.noteDirectFailure(request.platform, request.cacheKey, lastStatusCode)
+                /*
+                 * 把失败原因一并交出去：4xx 是防盗链的明确拒绝，值得记账；
+                 * 连不上、超时这类可能只是这一次不走运，不该让平台被永久钉在中转上。
+                 * 共享地址不记账：它失败多半是借来的那份凭据/地址本身的问题，
+                 * 把它算成「这个平台的直连不好用」会把用户自己的路由偏好带歪。
+                 */
+                if (!directOnly) {
+                    resolver.noteDirectFailure(request.platform, request.cacheKey, lastStatusCode)
+                }
                 // 用户锁定「直连」：不背着他改道——锁了就是锁了，把失败原样抛出去，
                 // 解析层的提醒会告诉他去设置里改成「智能」或「中转」。
-                if (resolver.preferenceOf(request.platform) == RoutePreference.Direct) {
+                if (directOnly || resolver.preferenceOf(request.platform) == RoutePreference.Direct) {
                     throw lastError ?: IOException("直连不可用")
                 }
             }

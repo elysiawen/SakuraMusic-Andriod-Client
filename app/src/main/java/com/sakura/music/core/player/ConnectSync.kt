@@ -36,6 +36,8 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.util.concurrent.atomic.AtomicLong
 import kotlinx.serialization.SerializationStrategy
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -68,6 +70,21 @@ class ConnectSync(
     private val settings: SettingsStore,
     private val json: Json,
     private val scope: CoroutineScope,
+    /**
+     * 本机正占着一起听的席位吗（由容器注入 `roomSync.seatActive`）。
+     *
+     * 席位设备放的是**房间的歌**，它不听别人指挥：遥控打进来只会和房间的镜像互相拽
+     * （这边切了一首，200 毫秒后被拉回房间那一首）。所以它对自己的遥控**只读**——
+     * 反过来它照样能遥控别的设备，房间里单向就够了。
+     */
+    private val roomSeat: () -> Boolean = { false },
+    /**
+     * 收到「把一起听的席位接过去」。
+     *
+     * 指令本身不带任何状态：目标设备自己知道房间码（旁观时也一直在收房间快照），
+     * 由它调用 `join` 接席位——名字、设备形态、个人现场都由那台设备如实处理。
+     */
+    private val onTakeSeat: () -> Unit = {},
 ) {
 
     /** 音质只用于上报显示，跟着设置走。 */
@@ -296,6 +313,21 @@ class ConnectSync(
             }
         }
 
+        /*
+         * 一起听占着席位：本机对遥控**只读**——别人看得到它在放什么，但动不了它。
+         *
+         * 例外只有两个：
+         * - `volume` 调的是这台设备的输出音量，与播放内容无关（协议 7.2），房间里也不冲突；
+         * - `unfollow` 是幂等的取消动作，不会和房间抢播放器。
+         *
+         * 其余指令一律忽略，但仍然补报一次状态：控制端就是靠「上报没变」判断它没生效的。
+         * 想操作一起听，请从房间面板发（那条路走服务端广播，两端一起变）。
+         */
+        if (roomSeat() && event.action !in READ_ONLY_ALLOWED) {
+            report()
+            return
+        }
+
         when (event.action) {
             // play 可以带队列（等于 transfer），不带就是 resume。
             "play" -> event.transferPayload()?.let(::loadAndPlay) ?: playback.play()
@@ -345,6 +377,9 @@ class ConnectSync(
             "transfer" -> event.transferPayload()?.let(::loadAndPlay)
 
             "release" -> handOver(event.from)
+
+            // 一起听：让我把房间的席位接过来——声音切到我这台。
+            ACTION_TAKE_SEAT -> onTakeSeat()
 
             else -> return
         }
@@ -418,6 +453,15 @@ class ConnectSync(
     private fun <T> encode(serializer: SerializationStrategy<T>, value: T): JsonObject =
         json.encodeToJsonElement(serializer, value) as JsonObject
 
+    /**
+     * 已经收到过几次对端的 `transfer`（回程）。
+     *
+     * 「接管」是个往返：本机发 `release`，对方才把队列回传过来。所以该等的确认是
+     * **回程到没到**，而不是 `release` 有没有送出去。用计数器比对比队列内容更可靠：
+     * 两台设备恰好放同一份队列时，比内容会分不出「接过来了」和「本来就一样」。
+     */
+    private val transferSeq = AtomicLong()
+
     private fun loadAndPlay(payload: TransferPayload) {
         // `sources` 缺了就播不出来——接收方要靠 platform + id 去解析播放地址。
         val tracks = payload.queue.filter { it.sources.isNotEmpty() }
@@ -432,6 +476,8 @@ class ConnectSync(
         }
         // 直接驱动：接管 / 交接是设备之间的事，不该被本机所在的房间拦下来改成「点歌」。
         playback.playDirect(tracks, index, startMs)
+        // 回程到了：正等着的 [requestTakeOver] 靠它判成功。
+        transferSeq.incrementAndGet()
     }
 
     /* ------------------------------ 界面用的动作 ------------------------------ */
@@ -439,17 +485,32 @@ class ConnectSync(
     /**
      * 把本机正在放的整条队列交给 [target]，并暂停自己（协议里的场景 B）。
      *
-     * 本地立刻停下，送达确认在后台等——不让用户为了一个提示多等几秒。
+     * 顺序是「先停、再等、失败回滚」：先停是为了对方接手时不出现两个声音；
+     * 等的是对方补报状态（见 [awaitAck]，一到就返回，不睡满）；
+     * 没交出去就把本机恢复成原来的播放状态——否则用户会以为已经投过去了。
      */
     suspend fun transferTo(target: String): AckResult {
+        /*
+         * 本机占着一起听席位时不往外投放：投出去的是房间的歌单和进度，而且这里会让本机暂停——
+         * 200 毫秒后房间又会把它叫起来，两端互相拽。房间里换设备只有「转移到本机」一条路。
+         */
+        if (roomSeat()) return AckResult.Failed
         val state = playback.state.value
         if (state.queue.isEmpty()) return AckResult.Failed
 
         val before = positionAtOf(target)
+        val wasPlaying = playback.state.value.isPlaying
         return when (client.sendCommand(target, ACTION_TRANSFER, transferPayload())) {
             ConnectOutcome.Delivered -> {
+                /*
+                 * 先停下再等确认：让对方接手时本机继续出声，就是两个声音叠在一起。
+                 * 但没交出去必须回滚——停在那里会让用户以为「已经投过去了」，
+                 * 实际是一片安静，还得自己去按播放。
+                 */
                 playback.pause()
-                awaitAck(target, before)
+                val result = awaitAck(target, before)
+                if (result == AckResult.NoResponse && wasPlaying) playback.play()
+                result
             }
 
             ConnectOutcome.Offline -> AckResult.Offline
@@ -466,12 +527,24 @@ class ConnectSync(
      * **不做送达确认**：这是个往返，确认应该看回程的 `transfer` 有没有到，
      * 在 `release` 之后就下结论是错的。
      */
-    suspend fun requestTakeOver(target: String): AckResult =
-        when (client.sendCommand(target, ACTION_RELEASE)) {
-            ConnectOutcome.Delivered -> AckResult.Delivered
+    suspend fun requestTakeOver(target: String): AckResult {
+        // 同 [transferTo]：占着席位时不搬别的设备的队列进来，那会把房间的队列顶掉。
+        if (roomSeat()) return AckResult.Failed
+        // 记下回程计数：`release` 送出去只是「请了」，队列回来才算数。
+        val seen = transferSeq.get()
+        return when (client.sendCommand(target, ACTION_RELEASE)) {
+            ConnectOutcome.Delivered -> {
+                val arrived = withTimeoutOrNull(TAKE_OVER_TIMEOUT_MS) {
+                    while (transferSeq.get() <= seen) delay(TAKE_OVER_POLL_MS)
+                    true
+                } ?: false
+                if (arrived) AckResult.Delivered else AckResult.NoResponse
+            }
+
             ConnectOutcome.Offline -> AckResult.Offline
             ConnectOutcome.Fatal, ConnectOutcome.Retryable -> AckResult.Failed
         }
+    }
 
     /**
      * 发一条指令，**不等送达确认**。
@@ -481,6 +554,15 @@ class ConnectSync(
      */
     suspend fun send(target: String, action: String, payload: JsonObject? = null): ConnectOutcome =
         client.sendCommand(target, action, payload)
+
+    /**
+     * 让 [target] 把一起听的席位接过去（设备面板上的「让声音切到这台」）。
+     *
+     * 只是**通知**：它收到后会自己 `join` 接席位，再由房间队列接管它的播放器。
+     * 所以这里只能告诉你「指令送到了没」，真正的反馈是它随后开始播房间的歌。
+     */
+    suspend fun takeSeat(target: String): ConnectOutcome =
+        client.sendCommand(target, ACTION_TAKE_SEAT)
 
     /* ------------------------------ 遥控模式与播放列表 ------------------------------ */
 
@@ -522,6 +604,8 @@ class ConnectSync(
 
     /** 简单遥控：暂停、继续、下一首、上一首这类不需要 payload 的动作，发完做送达确认。 */
     suspend fun remote(target: String, action: String): AckResult {
+        // 房间里不新开跟随（"让它跟随我"）：跟随与房间互斥，见 [startFollow]。
+        if (roomSeat() && action == "follow") return AckResult.Failed
         val before = positionAtOf(target)
         return when (client.sendCommand(target, action)) {
             ConnectOutcome.Delivered -> awaitAck(target, before)
@@ -536,16 +620,37 @@ class ConnectSync(
      * 网关返回 `ok: true` 只代表「已经写进那条连接」，不代表对方还在——网络中断的设备
      * 仍然挂在列表里（TCP 要过一会儿才发现）。判据是现成的：对方执行完指令会**立即补报状态**，
      * 所以看它的 `positionAt` 有没有往前走。
+     *
+     * **轮询而不是定时睡满**：局域网里对方通常一百毫秒内就补报了，固定睡满 [ACK_WAIT_MS]
+     * 只会让「已经成功了」这个结论凭空晚三秒才说出口。这里每 [ACK_POLL_MS] 查一次，
+     * 一到就返回；睡满才叫没响应。
      */
     private suspend fun awaitAck(target: String, before: Long?): AckResult {
-        delay(ACK_WAIT_MS)
-        val device = client.devices.value.firstOrNull { it.deviceId == target }
-            ?: return AckResult.Offline
-        val after = device.state?.positionAt
-        return if (before != null && after != null && after > before) {
-            AckResult.Delivered
-        } else {
-            AckResult.NoResponse
+        var gone = false
+        val acked = withTimeoutOrNull(ACK_WAIT_MS) {
+            var ok = false
+            while (true) {
+                val device = client.devices.value.firstOrNull { it.deviceId == target }
+                if (device == null) {
+                    // 等它的时候从列表里消失了：是真下线，不用再耗到超时。
+                    gone = true
+                    break
+                }
+                val after = device.state?.positionAt
+                // 目标本来就空闲（没有上报过状态）：现在有状态了，就是它执行并补报过。
+                // 早先这里要求 before != null，给一台空设备投放必然被判成「没响应」。
+                if (after != null && (before == null || after > before)) {
+                    ok = true
+                    break
+                }
+                delay(ACK_POLL_MS)
+            }
+            ok
+        }
+        return when {
+            acked == true -> AckResult.Delivered
+            gone -> AckResult.Offline
+            else -> AckResult.NoResponse
         }
     }
 
@@ -558,6 +663,11 @@ class ConnectSync(
      * 开始跟随。协议 7.5：不需要任何新协议，目标的状态本来就通过 `devices` 事件广播过来。
      */
     fun startFollow(deviceId: String, name: String) {
+        /*
+         * 房间与跟随是互斥的：本机占着席位时放的是房间的歌，再跟一台设备就是两套镜像
+         * 同时驱动同一个播放器（入房时已经停过一次跟随，这里堵的是事后重新点的那一下）。
+         */
+        if (roomSeat()) return
         if (!canFollow(deviceId)) return
         followMissingSinceMono = 0L
         _following.value = FollowTarget(deviceId, name)
@@ -730,7 +840,17 @@ class ConnectSync(
         const val DRIFT_CHECK_INTERVAL_MS = 1_000L
         const val DRIFT_THRESHOLD_SECONDS = 1.5
         const val DRIFT_COOLDOWN_MS = 5_000L
+        /** 等对方补报状态的上限：到点还没动静就算没响应。 */
         const val ACK_WAIT_MS = 3_500L
+
+        /** 等补报时的查询间隔。只是读一个本地列表，代价可以忽略。 */
+        const val ACK_POLL_MS = 80L
+
+        /** 等「接管」的回程（对方把队列 `transfer` 回来）最长多久。 */
+        const val TAKE_OVER_TIMEOUT_MS = 5_000L
+
+        /** 等回程时的轮询间隔：只是查一个计数，便宜。 */
+        const val TAKE_OVER_POLL_MS = 100L
         const val MIN_SEEK_SECONDS = 0.5
 
         /** 跟随的进度偏差超过它就直接 seek（协议 7.5 的三段式）。 */
@@ -751,6 +871,9 @@ class ConnectSync(
         const val FOLLOW_GRACE_MS = 15_000L
         const val ACTION_TRANSFER = "transfer"
         const val ACTION_RELEASE = "release"
+
+        /** 一起听：请目标设备接走房间席位（声音切到它）。 */
+        const val ACTION_TAKE_SEAT = "takeSeat"
         const val ACTION_MODE = "mode"
         const val ACTION_PLAY_AT = "playAt"
         const val ACTION_REMOVE = "remove"
@@ -760,6 +883,14 @@ class ConnectSync(
 
         /** 队列快照最多回传这么多首：网关对指令 payload 有 512KB 上限（协议 7.6）。 */
         const val MAX_QUEUE_SNAPSHOT = 200
+
+        /**
+         * 占着一起听席位时**仍然接受**的遥控。
+         *
+         * 只有「调这台设备的输出音量」和「取消跟随」——两者都不碰播放内容，
+         * 也就不会和房间的镜像打架。
+         */
+        val READ_ONLY_ALLOWED = setOf("volume", "unfollow")
     }
 }
 
