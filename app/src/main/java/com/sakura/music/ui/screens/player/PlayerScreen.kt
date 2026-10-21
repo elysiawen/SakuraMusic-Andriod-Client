@@ -363,6 +363,14 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
     Box(
         modifier = Modifier
             .fillMaxSize()
+            /*
+             * 位移加在**最外层**（连同底色一起），不是只挪里面的 Column。
+             *
+             * 底色是这页自己的：只挪内容的话，上面空出来的那一条露出的还是这层不透明的
+             * 底色（浅色主题下就是一片白），底下那页根本透不出来——「往下拖能看到底下的
+             * 页面」就成了空话。整块挪走，空出来的地方才真的是底下的页面。
+             */
+            .offset { IntOffset(0, collapseOffset.value.roundToInt()) }
             .background(MaterialTheme.colorScheme.background),
     ) {
         /*
@@ -385,7 +393,6 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
 
         Column(
             modifier = Modifier
-                .offset { IntOffset(0, collapseOffset.value.roundToInt()) }
                 .fillMaxSize()
                 .statusBarsPadding()
                 .navigationBarsPadding()

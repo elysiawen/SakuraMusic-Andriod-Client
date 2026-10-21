@@ -30,6 +30,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
 
@@ -238,6 +239,14 @@ class PlaybackCenter(
      */
     private val notifiedDowngrades = mutableSetOf<String>()
 
+    /**
+     * 已经因为「缓存里是试听片段」重装过的曲目。
+     *
+     * 每首只修一次：判据是「播放器报的时长明显短于歌曲长度」，正常歌曲偶尔也会因为
+     * 元数据不准落进这条线，重装一次还不对就说明不是缓存的问题，没必要反复折腾。
+     */
+    private val healedCacheKeys = ConcurrentHashMap.newKeySet<String>()
+
     init {
         scope.launch {
             settings.quality.collect { next ->
@@ -438,6 +447,9 @@ class PlaybackCenter(
                         )
                     }
 
+                    // 缓存里如果是以前那份试听片段，这里会把它扔掉重来一次。
+                    healTruncatedCache(active)
+
                     // 隔一阵子把进度也记下来。只靠「换歌 / 暂停」两个时机的话，
                     // 一直放着的时候进度会停在很早以前。
                     if (++ticks >= PERSIST_EVERY_TICKS) {
@@ -455,6 +467,43 @@ class PlaybackCenter(
         val reported = active.duration
         if (reported > 0) return reported
         return _state.value.current?.durationMs ?: 0L
+    }
+
+    /**
+     * 本地缓存里是「以前那份试听片段」时，把它扔掉重来一次。
+     *
+     * 音频缓存的键只有「平台 / ID / 音质」，管不了这份内容是完整版还是 30 秒片段：
+     * 没会员时听过的歌会把片段当成整首写进缓存，等借到会员再放，开头那段读的仍是本地
+     * 那份文件，放完就停——听起来就是「明明借到会员了，安卓还是在放试听」。
+     *
+     * 判据是硬的：解析结果是完整版（[PlaybackState.trial] 为 false），但播放器报的时长
+     * 明显短于歌曲本身。命中就把这个键的缓存删掉、从当前位置重装一次，这次读到的是网络
+     * 上的完整版。每首只修一次，见 [healedCacheKeys]。
+     */
+    private fun healTruncatedCache(active: MediaController) {
+        val state = _state.value
+        val track = state.current ?: return
+        val expected = track.durationMs
+        val actual = active.duration
+        if (expected <= 0L || actual <= 0L) return
+        if (actual >= expected * FRAGMENT_DURATION_RATIO) return
+        // 真的只有试听权限：那片段就是全部，删缓存也没用。
+        if (state.trial) return
+        // 没开音频缓存时不存在「缓存里的片段」，也就没什么可删的。
+        if (cacheManager.audioCacheOrNull() == null) return
+        if (!healedCacheKeys.add(track.key)) return
+
+        val source = track.sourceOf(preferredPlatform ?: Platform.UNKNOWN) ?: track.primarySource ?: return
+        val request = PlayRequest(source.platform, source.id, quality)
+        val position = active.currentPosition.coerceAtLeast(0L)
+        Log.i(LOG_TAG, "缓存里是试听片段，删除后重装：${track.title}（${actual}ms / ${expected}ms）")
+        mainScope.launch {
+            withContext(Dispatchers.IO) {
+                runCatching { cacheManager.removeAudio(request.cacheKey) }
+            }
+            // 进度保留：这一首可能已经放到几十秒，从头再来会让人以为播放被打断了。
+            playDirect(state.queue, state.index, position)
+        }
     }
 
     private fun syncFlags() {
@@ -1096,3 +1145,11 @@ private const val ERROR_VERIFY_MS = 1_500L
 
 /** 播放相关的日志标签：真出问题时 `adb logcat -s SakuraPlayback` 一条条看。 */
 private const val LOG_TAG = "SakuraPlayback"
+
+/**
+ * 播放器报的时长低于歌曲长度的这个比例时，就认为本地缓存里存的是**试听片段**。
+ *
+ * 取 0.8：完整版与元数据之间通常只差不到一秒，而试听片段只有 15 / 30 秒，
+ * 长一点的歌差得非常明显，中间这些情况不该被误判。
+ */
+private const val FRAGMENT_DURATION_RATIO = 0.8

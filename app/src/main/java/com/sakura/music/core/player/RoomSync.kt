@@ -3,6 +3,7 @@ package com.sakura.music.core.player
 import android.os.SystemClock
 import com.sakura.music.data.connect.ConnectClient
 import com.sakura.music.data.connect.ConnectOutcome
+import com.sakura.music.data.connect.TrackSummary
 import com.sakura.music.data.connect.toUnifiedTrack
 import com.sakura.music.data.model.UnifiedTrack
 import com.sakura.music.data.prefs.PlayMode
@@ -43,6 +44,9 @@ import kotlin.math.abs
  * 留到 6 秒是为了容忍移动网络和后台上被叫醒的延迟，又不至于让人一直盯着没反应的界面。
  */
 private const val SEAT_HANDOFF_TIMEOUT_MS = 6_000L
+
+/** 支持会员共享的两个平台，与网关的 `EntitlementPlatform` 对齐。 */
+private val SHARED_PLATFORMS = setOf("netease", "qq")
 
 /**
  * 「一起听」房间的客户端。
@@ -175,6 +179,14 @@ class RoomSync(
     /** 上一次重建用到的曲目与时刻（单调时钟），见 [allowRebuild]。 */
     private var lastRebuildKey: String? = null
     private var lastRebuildAt = 0L
+
+    /**
+     * 已经因为「借到会员」重装过的曲目。
+     *
+     * 每首只试一次：提供方本来就没有这个档位的权限时，重装只会换回另一条试听地址，
+     * 白白重新缓冲一次。离开房间时清空。
+     */
+    private val sharedReloaded = mutableSetOf<String>()
 
     /**
      * 冷启动时从本地读出来的房间码，等连上之后再对它一次账（见 [reconcileRoom]）。
@@ -527,7 +539,11 @@ class RoomSync(
          * 所以键取自房间、平台与 id 取自这次真正要播的音源——用户在房间里切过音源时，
          * 两者未必是同一个平台。
          */
-        val track = _playbackState.value?.track ?: return null
+        // 播放帧还没到（刚入房 / 刚切歌 / 重连后的第一拍）：退到房间快照里的当前曲目。
+        // 再拿不到就只能放弃——没有正确的曲目键，服务端一定会用 `track_mismatch` 挡回来。
+        val track = _playbackState.value?.track
+            ?: _room.value?.let { room -> room.queue.getOrNull(room.index) }
+            ?: return null
         val source = track.sources.firstOrNull { it.platform == platform }
         val isCurrentTrack = if (source != null) {
             source.id == request.id
@@ -805,6 +821,23 @@ class RoomSync(
             return
         }
 
+        /*
+         * 这一首只拿到试听片段，而本机正在借别人的会员：重新装一次。
+         *
+         * 授权常常是在歌已经开始放之后才到账的（对方刚点确认、快照刚同步到这里），
+         * 那一次解析只能拿到自己账号的试听；不重装就会把片段一直放到底。
+         * 每首只试一次，理由见 [sharedReloaded]。
+         */
+        if (playback.state.value.trial) {
+            val platform = sharedPlatformOf(track)
+            if (platform != null && borrowingFrom(platform) != null && sharedReloaded.add(track.key)) {
+                // 刚才那条试听地址还在解析缓存里，先作废，重装时才会真去要共享地址。
+                onEntitlementChanged?.invoke()
+                rebuild(roomTracks.ifEmpty { listOfNotNull(track.toUnifiedTrack()) }, track.key, state)
+                return
+            }
+        }
+
         // 同一首：先对齐播放态，再收拾进度偏差。
         if (state.playing && !local.isPlaying && !atTrackEnd(local)) {
             playback.play()
@@ -853,6 +886,10 @@ class RoomSync(
         lastRebuildAt = now
         return true
     }
+
+    /** 这一首属于哪个可共享的平台（`netease` / `qq`）；两个都不是就返回 null。 */
+    private fun sharedPlatformOf(track: TrackSummary): String? =
+        track.sources.firstOrNull { it.platform in SHARED_PLATFORMS }?.platform
 
     /** 把（房间的）队列装进播放器，并跳到房间当前那一首的位置。 */
     private suspend fun rebuild(queue: List<UnifiedTrack>, trackKey: String, state: RoomPlayback) {
@@ -980,6 +1017,7 @@ class RoomSync(
         _spectating.value = false
         _room.value = null
         _playbackState.value = null
+        sharedReloaded.clear()
         // 已经不在共享关系里了：缓存里那些借来的地址不能留给下一次单播。
         onEntitlementChanged?.invoke()
     }
@@ -1073,6 +1111,7 @@ class RoomSync(
         _spectating.value = false
         _room.value = null
         _playbackState.value = null
+        sharedReloaded.clear()
         togetherSeconds = 0.0
         togetherSessionSeconds = 0.0
         togetherCounting = false

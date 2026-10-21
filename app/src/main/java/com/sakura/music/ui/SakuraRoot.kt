@@ -1,8 +1,12 @@
 package com.sakura.music.ui
 
 import android.widget.Toast
+import androidx.activity.compose.PredictiveBackHandler
 import androidx.compose.animation.AnimatedContentTransitionScope
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.tween
@@ -16,6 +20,7 @@ import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
@@ -25,6 +30,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -46,13 +52,17 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
@@ -60,6 +70,7 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
@@ -98,6 +109,9 @@ import com.sakura.music.ui.screens.search.SearchScreen
 import com.sakura.music.ui.screens.settings.SettingsScreen
 import com.sakura.music.ui.theme.AccentTheme
 import com.sakura.music.ui.theme.SakuraTheme
+import java.util.concurrent.CancellationException
+import kotlin.math.roundToInt
+import kotlinx.coroutines.launch
 
 /**
  * 播放器浮层。
@@ -151,6 +165,16 @@ private fun PlayerHost(
     val playerVisible = open && !coveredByDetail
 
     /*
+     * 这一次返回会不会正好把播放页露回来。
+     *
+     * 弹掉详情页之后落在哪一页，就是 `previousBackStackEntry`。只有它正是**打开播放页的那一页**
+     * 时，返回的结果才是「播放页重新盖上来」；详情页摞详情页（歌手 → 专辑）时落点还是详情页，
+     * 播放页仍旧被压着，那种情况交给 NavHost 按普通返回去演。
+     */
+    val revealsPlayer =
+        open && coveredByDetail && navController.previousBackStackEntry == openedFrom
+
+    /*
      * 这一次显露是不是「从详情页回来的」。
      *
      * 两种入场必须分开：
@@ -168,7 +192,30 @@ private fun PlayerHost(
         if (open && coveredByDetail) revealFromDetail = true
     }
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    /*
+     * 预测式返回时播放页的位移（像素）。
+     *
+     * 用 Animatable 而不是普通 state：拖动过程要**跟手**（snapTo），手势取消要**弹回去**
+     * （animateTo），两种节奏都在它身上。
+     */
+    val dragOffset = remember { Animatable(0f) }
+    // 回弹发生在手势协程已经被取消之后，得另起一个作用域才跑得动。
+    val scope = rememberCoroutineScope()
+
+    /*
+     * 「详情页退回播放页」这一下的进度：1 = 播放页完整盖着，0 = 完全让给详情页。
+     *
+     * 播放页不在导航栈里，NavHost 的预测式返回只能预览它自己栈里的上一页，拖动时露出来的是
+     * 播放页**底下**那一页——和松手后的结果对不上。所以这一种由我们自己演：同一组转场参数
+     * （见 PAGE_SLIDE_FRACTION / PAGE_SLIDE_MS），导航层跟着进度右移淡出，播放页从左推上来。
+     */
+    val popPreview = remember { Animatable(1f) }
+    var popGestureActive by remember { mutableStateOf(false) }
+
+    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+        // 进度 1 时播放页该刚好滑出屏幕，所以整段位移按这一层的高度算。
+        val overlayHeightPx = with(LocalDensity.current) { maxHeight.toPx() }
+
         SakuraNavigation(
             navController = navController,
             navigator = navigator,
@@ -182,34 +229,120 @@ private fun PlayerHost(
                 revealFromDetail = false
                 onOpen()
             },
+            /*
+             * 手势预览时把整块导航内容当成转场里的「上一页」挪走：
+             * 右移 1/5 屏 + 淡出，和 popExitTransition 是同一组参数。
+             * 用 graphicsLayer 而不是重组：进度每帧都在动，这条路径不经过 composition。
+             */
+            modifier = Modifier.graphicsLayer {
+                // 不在手势里时 f = 0，等于这一层什么都没做（graphicsLayer 的属性会沿用上一次的
+                // 值，所以两种状态都得显式写一遍）。
+                val f = if (popGestureActive) popPreview.value else 0f
+                alpha = 1f - f
+                translationX = f * size.width / PAGE_SLIDE_FRACTION
+            },
         )
 
-        // 必须用「露着才组合」而不是常驻 + enabled 开关：
-        // OnBackPressedDispatcher 是按注册顺序取最后一个生效的，而 NavHost 每次页面
-        // 切换都会重新注册自己的「弹栈」回调——常驻的那个是启动时就注册的，
-        // 永远排在它后面，于是系统返回会去弹底下的页面（首页除外，因为首页无可弹）。
-        // 露着的时候才组合，注册时机就在 NavHost 之后，优先级才对。
-        //
-        // 条件用 playerVisible 而不是 open：跳去详情页时 open 还是 true（为了回来时能自动
-        // 展开），这时候返回键必须去弹详情页，不能被播放页抢走。
-        if (playerVisible) {
-            androidx.activity.compose.BackHandler { onClose() }
+        /*
+         * 预测式返回：播放页开着的时候，整段手势归这一层。
+         *
+         * 不能只挂个 BackHandler 等松手再处理：`enableOnBackInvokedCallback` 打开之后，系统会
+         * 把返回手势交给**能跟进度的那个回调**，只听「按下」的拿不到拖动过程——用户按住
+         * 往后拖，画面一动不动，松手才「啪」地跳一下，预测式返回等于白开了。
+         *
+         * 两种情形分开演：
+         * - 播放页正露着：按进度把浮层往下推，底下的页面随之露出来；松手关掉播放页，
+         *   剩下的路交给 AnimatedVisibility 的退出动画接着滑完，中途滑回去则弹回原位。
+         * - 详情页压着播放页：演的是「详情页退场、播放页重新盖上来」（见 popPreview），
+         *   松手后真的弹栈——播放页此刻已经盖满屏，底下那一下转场看不见。
+         *
+         * 谁拿得到手势由**注册顺序**决定：dispatcher 只把整段手势交给最后注册的那个回调。
+         * 这里必须晚于 NavHost 注册，否则手势仍归它，预览的还是它栈里的上一页。
+         * 平时靠「打开播放页时才组合这一层」就够了；但 NavHost 藏在 Scaffold 的 subcompose 里，
+         * 是**测量阶段**才注册的——首帧就带着播放页（旋转、进程重建）时这里反而更早，
+         * 所以首帧之后再换一次 key，让它摘掉重加，稳落在最后。
+         *
+         * 详情页摞详情页（落点还是详情页）时这里不组合，手势照旧留给 NavHost。
+         */
+        var backRegistration by remember { mutableIntStateOf(0) }
+        LaunchedEffect(Unit) { backRegistration++ }
+
+        if (playerVisible || revealsPlayer) {
+            key(backRegistration) {
+                PredictiveBackHandler(enabled = true) { backEvent ->
+                    if (revealsPlayer) {
+                        var moved = false
+                        popPreview.snapTo(0f)
+                        try {
+                            backEvent.collect {
+                                // 进度真的到了才把浮层摆上来：系统若只给「按下」不给进度
+                                // （旧版本的返回键就是如此），就当普通返回处理，别凭空演预览。
+                                if (!moved) {
+                                    moved = true
+                                    popGestureActive = true
+                                }
+                                popPreview.snapTo(it.progress)
+                            }
+                            if (moved) {
+                                // 松手的位置未必到 1，补完最后一段再弹栈。
+                                popPreview.animateTo(1f, tween(160, easing = FastOutSlowInEasing))
+                            }
+                            navController.popBackStack()
+                            popGestureActive = false
+                        } catch (_: CancellationException) {
+                            if (popGestureActive) {
+                                scope.launch {
+                                    popPreview.animateTo(
+                                        0f,
+                                        tween(180, easing = FastOutSlowInEasing),
+                                    )
+                                    popGestureActive = false
+                                }
+                            }
+                        }
+                    } else {
+                        dragOffset.snapTo(0f)
+                        try {
+                            backEvent.collect { dragOffset.snapTo(it.progress * overlayHeightPx) }
+                            // 提交：停在手指离开时的位置，让退出动画从这儿接着往下走。
+                            onClose()
+                        } catch (_: CancellationException) {
+                            scope.launch {
+                                dragOffset.animateTo(0f, tween(180, easing = FastOutSlowInEasing))
+                            }
+                        }
+                    }
+                }
+            }
         }
 
+        // 手势结束时位移留在原地让退场动画接住，等它下次露出来再归零，
+        // 否则重新打开时浮层会先错开一截。
+        LaunchedEffect(playerVisible) {
+            if (playerVisible) {
+                dragOffset.snapTo(0f)
+                popPreview.snapTo(1f)
+            }
+        }
 
         // 跳去歌手 / 专辑页、再从那儿回来时，播放页在转场里扮的是**被推走 / 重新露出来的
         // 那一页**，所以直接用导航那一套参数（同一组常量，两边不会再各改各的）：
         // 被推走 = 淡出（导航里任何页面被下一个盖住都是这么退场的），重新露出来 = 从左侧滑入
         // + 淡入（和导航返回时「上一页」的入场逐帧一致）。只有用户自己开 / 关才用竖向滑动。
         AnimatedVisibility(
-            visible = playerVisible,
-            enter = if (revealFromDetail) {
-                slideInHorizontally(
+            // 触发返回手势时播放页虽然还「压着」，但要跟着手势一起露出来。
+            visible = playerVisible || popGestureActive,
+            // 手势拖到哪儿，浮层就停在哪儿；这个位移叠在入场 / 退场动画之上。
+            modifier = Modifier.offset { IntOffset(0, dragOffset.value.roundToInt()) },
+            // 手势预览期间浮层完全按进度画，再叠一层入场动画的话两段位移会加在一起。
+            enter = when {
+                popGestureActive -> EnterTransition.None
+                revealFromDetail -> slideInHorizontally(
                     initialOffsetX = { -it / PAGE_SLIDE_FRACTION },
                     animationSpec = tween(PAGE_SLIDE_MS, easing = FastOutSlowInEasing),
                 ) + fadeIn(tween(PAGE_FADE_IN_MS))
-            } else {
-                slideInVertically(
+
+                else -> slideInVertically(
                     initialOffsetY = { it },
                     animationSpec = tween(280, easing = FastOutSlowInEasing),
                 ) + fadeIn(tween(220))
@@ -223,7 +356,21 @@ private fun PlayerHost(
                 ) + fadeOut(tween(220))
             },
         ) {
-            PlayerScreen(onCollapse = onClose, navigator = navigator)
+            /*
+             * 进度即透明度与横向位置：0 时完全让位给详情页，1 时就是浮层本来的样子。
+             * 正常显示时进度恒为 1，这一层等于没加。
+             */
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .graphicsLayer {
+                        alpha = popPreview.value
+                        translationX =
+                            -(1f - popPreview.value) * size.width / PAGE_SLIDE_FRACTION
+                    },
+            ) {
+                PlayerScreen(onCollapse = onClose, navigator = navigator)
+            }
         }
     }
 }
@@ -423,6 +570,13 @@ private fun SakuraNavigation(
      */
     playerVisible: Boolean,
     onOpenPlayer: () -> Unit,
+    /**
+     * 手势预览时整块导航内容的位移 / 透明度（见 `PlayerHost` 里的 popPreview）。
+     *
+     * 挂在这里而不是外面再包一层，是为了让位移作用在**整块**（页面 + 底栏 + 迷你条）上，
+     * 和系统返回时「上一页整块滑走」的样子一致。
+     */
+    modifier: Modifier = Modifier,
 ) {
     val backStackEntry by navController.currentBackStackEntryAsState()
     // 首帧 back stack 还没建好，按起始页（发现）算，免得底部栏闪一下才出现。
@@ -484,6 +638,7 @@ private fun SakuraNavigation(
     )
 
     Scaffold(
+        modifier = modifier,
         containerColor = MaterialTheme.colorScheme.background,
         bottomBar = {
             Column(

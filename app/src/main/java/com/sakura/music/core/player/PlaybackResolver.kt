@@ -186,7 +186,15 @@ class PlaybackResolver(
 
     fun cached(request: PlayRequest): PlayResolveResult? {
         val entry = cache[request.cacheKey] ?: return null
-        if (System.currentTimeMillis() - entry.createdAt > CACHE_TTL_MS) {
+        /*
+         * 试听结果只留很短一段时间。
+         *
+         * 一次竞态（共享授权刚到账、房间的当前曲目帧还没来）就可能让自己账号解析出
+         * 片段来；如果也按正常 TTL 缓存三分钟，这首歌就会一直停在片段上。短 TTL 让
+         * 下一次重试重新问一遍共享地址，而重试由镜像那边盯着（见 `RoomSync.syncToRoom`）。
+         */
+        val ttl = if (entry.result.trial) TRIAL_CACHE_TTL_MS else CACHE_TTL_MS
+        if (System.currentTimeMillis() - entry.createdAt > ttl) {
             cache.remove(request.cacheKey)
             return null
         }
@@ -253,6 +261,9 @@ class PlaybackResolver(
     private companion object {
         /** 令牌有效期 10 分钟，缓存留足余量。 */
         const val CACHE_TTL_MS = 3 * 60 * 1000L
+
+        /** 试听片段不值得长期持有：见 [cached]，给下一次重试留出机会。 */
+        const val TRIAL_CACHE_TTL_MS = 10 * 1000L
 
         /** 锁定直连时连着失败这么多次，就提醒用户去设置里换连接方式。 */
         const val DIRECT_FAILURE_HINT = 3
