@@ -461,9 +461,9 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                     Quality.HIGH -> "默认档位，无明显音质损失"
                     Quality.LOSSLESS -> "需要平台会员"
                     Quality.HIRES -> "需要平台会员，且只有网易云有"
-                    Quality.SPATIAL -> "高清臻音，需要对应等级的会员"
-                    Quality.MASTER -> "超清母带，需要对应等级的会员"
-                    Quality.SURROUND -> "沉浸环绕声，需要对应等级的会员"
+                    Quality.SPATIAL -> "臻品音质（网易云称高清臻音），需要对应等级的会员"
+                    Quality.MASTER -> "臻品母带 4.0（网易云称超清母带），需要对应等级的会员"
+                    Quality.SURROUND -> "臻品全景声（网易云称沉浸环绕声），需要对应等级的会员"
                 }
             },
             onSelect = { scope.launch { container.settings.setQuality(it) } },

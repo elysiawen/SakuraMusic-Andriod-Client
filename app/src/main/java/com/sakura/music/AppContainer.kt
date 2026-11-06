@@ -18,7 +18,9 @@ import com.sakura.music.data.connect.DeviceIdentity
 import com.sakura.music.data.downloads.DownloadCenter
 import com.sakura.music.data.downloads.DownloadStore
 import com.sakura.music.data.model.HealthResponse
+import com.sakura.music.data.model.Platform
 import com.sakura.music.data.network.NetworkPolicy
+import com.sakura.music.data.prefs.PlatformCapability
 import com.sakura.music.data.prefs.PlaybackSessionStore
 import com.sakura.music.data.prefs.SettingsStore
 import com.sakura.music.data.remote.ApiClient
@@ -32,6 +34,7 @@ import com.sakura.music.data.session.SakuraCookieJar
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
@@ -98,6 +101,14 @@ class AppContainer(private val appContext: Context) {
                     connectClient.stop()
                 }
             }
+        }
+
+        /*
+         * 电台是后台流：光在首页把卡片藏起来不够，正在播的那条流仍会向已关闭的平台续歌，
+         * 刷新后从存档恢复的电台也一样。开关一变（含云端配置拉回来）就地收掉它。
+         */
+        scope.launch {
+            platformPrefs.state.drop(1).collect { playbackCenter.onPlatformPrefsChanged() }
         }
     }
 
@@ -456,6 +467,12 @@ class AppContainer(private val appContext: Context) {
             networkPolicy = networkPolicy,
             cacheManager = cacheManager,
             scope = scope,
+            // 电台与首页推荐共用一套开关判定：关掉的平台连一次续播请求都不该发出去。
+            radioPlatformAllowed = { platform: Platform ->
+                platformPrefs.isEnabled(platform, PlatformCapability.DISCOVER)
+            },
+            // 电台与「一起听」互斥，判据取房间语义而不是 UI 按钮。
+            roomActive = { roomSync.active },
         )
     }
 }

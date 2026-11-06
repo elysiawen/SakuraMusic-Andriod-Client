@@ -19,6 +19,22 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
+/**
+ * 首页两张电台卡片背后的分区 key（与网关 `/api/discover/feed` 一致）。
+ *
+ * 它们不能混进普通曲目轨道：卡片只把第一首画成封面，整批要交给播放器按顺序放完，
+ * 最后一首开始播时再由电台接口续下一批。
+ */
+private const val NETEASE_FM_KEY = "netease-fm"
+private const val QQ_GUESS_KEY = "qq-guess"
+private val RADIO_SECTION_KEYS = setOf(NETEASE_FM_KEY, QQ_GUESS_KEY)
+
+fun radioSectionKey(platform: Platform): String = when (platform) {
+    Platform.NETEASE -> NETEASE_FM_KEY
+    Platform.QQ -> QQ_GUESS_KEY
+    else -> ""
+}
+
 /** 发现页的一个分区：要么是一排歌，要么是一排歌单/榜单。 */
 data class HomeSection(
     val key: String,
@@ -45,8 +61,16 @@ class HomeViewModel(
         val error: String? = null,
         val message: String? = null,
     ) {
+        /** 电台分区单独画成顶部两张大卡片，不再走横向轨道。 */
         val trackSections: List<HomeSection>
-            get() = sections.filter { it.kind == DiscoverKind.TRACKS }
+            get() = sections.filter {
+                it.kind == DiscoverKind.TRACKS && it.key !in RADIO_SECTION_KEYS
+            }
+
+        val radioSections: List<HomeSection>
+            get() = sections.filter {
+                it.kind == DiscoverKind.TRACKS && it.key in RADIO_SECTION_KEYS
+            }
 
         val collectionSections: List<HomeSection>
             get() = sections.filter { it.kind != DiscoverKind.TRACKS }

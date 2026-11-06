@@ -27,6 +27,7 @@ import com.sakura.music.data.model.PreferenceEntry
 import com.sakura.music.data.model.PreferenceListResponse
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.QualitySerializer
+import com.sakura.music.data.model.RadioBatch
 import com.sakura.music.data.model.RemoveTrackResponse
 import com.sakura.music.data.model.SearchResult
 import com.sakura.music.data.model.SearchType
@@ -255,6 +256,28 @@ class SakuraApi(
         path = "/api/discover/feed",
         deserializer = DiscoverFeed.serializer(),
         query = mapOf("platforms" to platforms),
+    )
+
+    /**
+     * 电台续播：`session` 为空表示新开一个电台，`exclude` 是当前队列的 `track.key`。
+     *
+     * 上游一次只给 3~5 首，网关按会话去重后直接返回这一小批；快听完时再要下一批。
+     * 不落缓存：每次都要新歌，缓存住等于永远推同一批。
+     */
+    suspend fun radio(
+        platform: Platform,
+        session: String? = null,
+        limit: Int = 6,
+        exclude: List<String> = emptyList(),
+    ): RadioBatch = client.request(
+        method = "GET",
+        path = "/api/radio/${platform.id}",
+        deserializer = RadioBatch.serializer(),
+        query = mapOf(
+            "session" to session?.takeIf { it.isNotBlank() },
+            "limit" to limit,
+            "exclude" to exclude.takeLast(60).joinToString(",").takeIf { it.isNotEmpty() },
+        ),
     )
 
     suspend fun toplists(platform: Platform): PlaylistSummaryListResponse = client.request(

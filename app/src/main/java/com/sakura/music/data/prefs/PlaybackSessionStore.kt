@@ -1,16 +1,25 @@
 package com.sakura.music.data.prefs
 
 import android.content.Context
+import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.UnifiedTrack
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
-/** 上次的播放现场：队列、听到第几首、听到哪儿了。 */
+/** 上次的电台现场：只在电台仍激活时写入，退出电台会立刻删掉，重启不会复活。 */
+@Serializable
+data class RadioLive(
+    val platform: Platform = Platform.UNKNOWN,
+    val session: String = "",
+)
+
+/** 上次的播放现场：队列、听到第几首、听到哪儿了，以及仍在听的电台。 */
 @Serializable
 data class PlaybackSession(
     val queue: List<UnifiedTrack> = emptyList(),
     val index: Int = 0,
     val positionMs: Long = 0L,
+    val radioLive: RadioLive? = null,
 )
 
 /**

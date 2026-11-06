@@ -84,6 +84,39 @@ object QualitySerializer : KSerializer<Quality> {
     override fun serialize(encoder: Encoder, value: Quality) = encoder.encodeString(value.id)
 }
 
+/**
+ * QQ 音乐客户端 20.x 的音质面板叫法。面板写「臻品母带 4.0」，紧凑处只写「臻品母带」，
+ * 所以和 [qualityLabel] 成对出现；网易云沿用 [Quality.label] 那套通用叫法。
+ */
+private fun qqQualityMenu(quality: Quality): String = when (quality) {
+    Quality.STANDARD -> "标准品质"
+    Quality.HIGH -> "HQ 高品质"
+    Quality.LOSSLESS -> "SQ 无损品质"
+    Quality.SPATIAL -> "臻品音质"
+    Quality.MASTER -> "臻品母带 4.0"
+    Quality.SURROUND -> "臻品全景声"
+    // QQ 没有 Hi-Res 这一档，落到通用叫法即可。
+    Quality.HIRES -> quality.label
+}
+
+private fun qqQualityShort(quality: Quality): String = when (quality) {
+    Quality.STANDARD -> "标准"
+    Quality.HIGH -> "HQ"
+    Quality.LOSSLESS -> "SQ"
+    Quality.SPATIAL -> "臻品音质"
+    Quality.MASTER -> "臻品母带"
+    Quality.SURROUND -> "臻品全景声"
+    Quality.HIRES -> quality.label
+}
+
+/** 音质面板里的完整档位名，按**当前曲目所属平台**取。 */
+fun qualityMenuLabel(quality: Quality, platform: Platform?): String =
+    if (platform == Platform.QQ) qqQualityMenu(quality) else quality.label
+
+/** 芯片、提示语这类紧凑处用短名，免得被「SQ 无损品质」撑开。 */
+fun qualityLabel(quality: Quality, platform: Platform?): String =
+    if (platform == Platform.QQ) qqQualityShort(quality) else quality.label
+
 /** 搜索页的类型页签。 */
 @Serializable
 enum class SearchType(val id: String, val label: String) {
@@ -374,6 +407,19 @@ data class DiscoverFeed(
     val errors: List<DiscoverError> = emptyList(),
 )
 
+/**
+ * 电台（私人 FM / 猜你喜欢）续播的一批曲目。
+ *
+ * `session` 下次请求要原样带回；空批次不代表电台枯竭，仍按冷却重试。
+ */
+@Serializable
+data class RadioBatch(
+    val session: String = "",
+    val platform: Platform = Platform.UNKNOWN,
+    val items: List<UnifiedTrack> = emptyList(),
+    val hasMore: Boolean = true,
+)
+
 /* ------------------------------ 播放 ------------------------------ */
 
 /** 直连播放所需的地址与请求头（由平台 CDN 的防盗链要求决定）。 */
@@ -410,6 +456,10 @@ data class LyricResult(
     val lrc: String = "",
     val trans: String = "",
     val roma: String = "",
+    /** 网易云 YRC 逐字歌词原文；上游没给时缺省。 */
+    val yrc: String? = null,
+    /** QQ 音乐 QRC 逐字歌词原文（可能裹在 XML 的属性里）；上游没给时缺省。 */
+    val qrc: String? = null,
 )
 
 /* ------------------------------ 账户 ------------------------------ */

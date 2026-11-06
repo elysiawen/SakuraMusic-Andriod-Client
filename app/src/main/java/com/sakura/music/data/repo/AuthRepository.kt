@@ -123,8 +123,15 @@ class AuthRepository(
         }
     }
 
-    /** 被 [com.sakura.music.data.remote.ApiClient] 在 401 时回调。 */
+    /**
+     * 被 [com.sakura.music.data.remote.ApiClient] 在 `401 + unauthorized` 时回调。
+     *
+     * 网关的会话是**滑动续期**：活跃期间服务端会用 `Set-Cookie` 延长 Cookie 的有效期，
+     * CookieJar 会照常把它落盘，这里不需要额外的刷新接口。真正到顶（绝对上限）或
+     * 会话在别处作废时才走到这一步；多个并发请求一起 401 时只收尾一次。
+     */
     fun onSessionExpired() {
+        if (_state.value.user == null && !_state.value.offline) return
         cookies.clear()
         _state.value = AuthState(resolved = true)
     }

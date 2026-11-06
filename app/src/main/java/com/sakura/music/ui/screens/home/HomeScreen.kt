@@ -44,6 +44,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.sakura.music.data.model.DiscoverKind
 import com.sakura.music.data.model.Platform
+import com.sakura.music.data.prefs.PlatformCapability
 import com.sakura.music.ui.appContainer
 import com.sakura.music.ui.components.ContentTopPadding
 import com.sakura.music.ui.components.InfoNotice
@@ -51,6 +52,7 @@ import com.sakura.music.ui.components.ListBottomPadding
 import com.sakura.music.ui.components.LoadingState
 import com.sakura.music.ui.components.NoticeTone
 import com.sakura.music.ui.components.PlaylistCard
+import com.sakura.music.ui.components.RadioCards
 import com.sakura.music.ui.components.SakuraTopBar
 import com.sakura.music.ui.components.SearchEntryBar
 import com.sakura.music.ui.components.SectionTitleRow
@@ -76,9 +78,17 @@ fun HomeScreen(navigator: SakuraNavigator) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val auth by container.authRepository.state.collectAsStateWithLifecycle()
     val playback by container.playbackCenter.state.collectAsStateWithLifecycle()
+    val platformPrefs by container.platformPrefs.state.collectAsStateWithLifecycle()
+    // 电台与「一起听」互斥：在房间里时卡片置灰、不可点。
+    val roomCode by container.roomSync.code.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
     val current = state
+    // 电台卡片跟着平台开关走：被关掉的平台连占位卡片都不留。
+    // feed 为空（例如还没绑定账号）时卡片仍在，点开会退化成「现取一批」。
+    val radioPlatforms = Platform.known.filter {
+        platformPrefs.isEnabled(it, PlatformCapability.DISCOVER)
+    }
 
     /*
      * 「第三方账号绑定请在网页端完成」那条提示：给个「×」关掉，关过就不再出现。
@@ -154,7 +164,7 @@ fun HomeScreen(navigator: SakuraNavigator) {
                         onAction = { viewModel.load(force = true) },
                     )
 
-                    current.sections.isEmpty() -> StateMessage(
+                    current.sections.isEmpty() && radioPlatforms.isEmpty() -> StateMessage(
                         icon = Icons.Rounded.AutoAwesome,
                         title = "暂时没有可展示的推荐",
                         message = "可能是两个上游服务未启动，或账号未绑定第三方平台导致个性化内容不可用。",
@@ -196,6 +206,23 @@ fun HomeScreen(navigator: SakuraNavigator) {
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 6.dp),
                                 )
                             }
+                        }
+
+                        // 电台卡片跟着平台开关隐藏：关掉的平台连占位卡片都不留，
+                        // 否则点开会退化成「现取一批」，反而绕过开关继续向该平台发请求。
+                        item(key = "radio-cards") {
+                            RadioCards(
+                                platforms = radioPlatforms,
+                                sections = current.radioSections,
+                                radio = playback.radio,
+                                radioLoading = playback.radioLoading,
+                                roomActive = roomCode != null,
+                                onStart = { platform, tracks ->
+                                    container.playbackCenter.startRadio(platform, tracks)
+                                },
+                                onStop = { container.playbackCenter.stopRadio() },
+                                modifier = Modifier.padding(bottom = 12.dp),
+                            )
                         }
 
                         items(current.trackSections, key = { "t-${it.key}" }) { section ->

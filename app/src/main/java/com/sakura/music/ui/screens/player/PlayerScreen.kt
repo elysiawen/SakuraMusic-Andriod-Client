@@ -15,6 +15,7 @@ import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -33,9 +34,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AttachFile
@@ -75,20 +74,25 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -108,6 +112,7 @@ import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -115,11 +120,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import coil.compose.AsyncImage
 import com.sakura.music.core.player.LrcParser
 import com.sakura.music.core.player.LyricLine
+import com.sakura.music.core.player.LyricWord
 import com.sakura.music.core.player.PlaybackRoute
 import com.sakura.music.data.model.ArtistRef
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.model.qualityLabel
+import com.sakura.music.data.model.qualityMenuLabel
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.data.room.RoomMemberView
@@ -445,10 +453,49 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     }
                     Spacer(Modifier.width(6.dp))
                 }
+                // 电台播放中：离开首页后也要有「退出电台」的出口，否则只能回发现页找卡片。
+                // 用 primary/onPrimary：tertiaryContainer 没在主题里定义，会回落到 Material
+                // 默认色板，换强调色时它纹丝不动，看起来就像「不跟主题色走」。
+                state.radio?.let { active ->
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.clickable { container.playbackCenter.stopRadio() },
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .padding(horizontal = 12.dp)
+                                .height(36.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                imageVector = Icons.Rounded.MusicNote,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onPrimary,
+                                modifier = Modifier.size(15.dp),
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                text = "${active.platform.label}电台 · 退出",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = MaterialTheme.colorScheme.onPrimary,
+                                maxLines = 1,
+                            )
+                        }
+                    }
+                    Spacer(Modifier.width(6.dp))
+                }
                 // 一起听：和朋友在两个客户端上同步听同一首歌。
                 // 在房间里时图标染成强调色并带一个小圆点——不然退出去看别的页面回来，
                 // 光从一个灰图标上分不出自己还在不在房间里。
-                IconButton(onClick = { showTogether = true }) {
+                IconButton(onClick = {
+                    // 电台与「一起听」互斥：说清楚为什么点不开，比灰掉一个图标友好。
+                    if (state.radio != null) {
+                        message = "正在听私人电台，请先退出电台再使用「一起听」"
+                    } else {
+                        showTogether = true
+                    }
+                }) {
                     Box(contentAlignment = Alignment.TopEnd) {
                         Icon(
                             imageVector = Icons.Rounded.Groups,
@@ -496,68 +543,95 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                         .weight(1f)
                         .fillMaxWidth(),
                 ) {
-                    Column(
+                    /*
+                     * 横屏的高度比竖屏紧张得多（有些设备扣掉状态栏只剩 300dp 出头）。
+                     * 以前封面按宽度定边长、传输键固定 70dp，再套一层 verticalScroll：
+                     * 内容一超高，可滚动 Column 就把中间那颗大按钮的下沿裁掉一小截。
+                     *
+                     * 现在反过来：封面吃掉「除控件之外的剩余高度」，在剩余空间里取宽高较小值
+                     * 保持正方形；传输键按可用高度缩放。固定控件的高度不用猜，交给 weight 算。
+                     */
+                    BoxWithConstraints(
                         modifier = Modifier
                             .weight(0.42f)
-                            .fillMaxHeight()
-                            .verticalScroll(rememberScrollState()),
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center,
+                            .fillMaxHeight(),
                     ) {
-                        Box(
+                        val playButtonSize = (maxHeight * 0.16f).coerceIn(44.dp, 70.dp)
+                        val gap = (maxHeight * 0.025f).coerceIn(4.dp, 12.dp)
+                        Column(
                             modifier = Modifier
-                                .fillMaxWidth(0.75f)
-                                .aspectRatio(1f)
-                                .then(collapseGesture),
+                                .fillMaxHeight()
+                                // 留一点下边距：按钮不该贴着系统手势区。
+                                .padding(bottom = 8.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
                         ) {
-                            CoverArt(
-                                cover = track.album.cover,
-                                showBuffering = showBuffering,
-                                modifier = Modifier.matchParentSize(),
-                            )
-                            RouteBadge(
-                                route = route,
+                            BoxWithConstraints(
                                 modifier = Modifier
-                                    .align(Alignment.TopEnd)
-                                    .padding(10.dp),
-                            )
-                            if (inRoom) {
-                                TogetherCoverBand(
-                                    text = togetherBadgeText,
-                                    me = container.roomSync.myAccountMember(),
-                                    partner = container.roomSync.otherMember(),
-                                    onClick = { showTogether = true },
-                                    modifier = Modifier.align(Alignment.BottomCenter),
-                                )
+                                    .weight(1f)
+                                    .fillMaxWidth(0.75f),
+                            ) {
+                                val side = minOf(maxWidth, maxHeight)
+                                Box(
+                                    modifier = Modifier
+                                        .size(side)
+                                        .align(Alignment.Center)
+                                        .then(collapseGesture),
+                                ) {
+                                    CoverArt(
+                                        cover = track.album.cover,
+                                        showBuffering = showBuffering,
+                                        modifier = Modifier.matchParentSize(),
+                                    )
+                                    RouteBadge(
+                                        route = route,
+                                        modifier = Modifier
+                                            .align(Alignment.TopEnd)
+                                            .padding(10.dp),
+                                    )
+                                    if (inRoom) {
+                                        TogetherCoverBand(
+                                            text = togetherBadgeText,
+                                            me = container.roomSync.myAccountMember(),
+                                            partner = container.roomSync.otherMember(),
+                                            onClick = { showTogether = true },
+                                            modifier = Modifier.align(Alignment.BottomCenter),
+                                        )
+                                    }
+                                }
                             }
+                            Spacer(Modifier.height(gap))
+                            TrackInfo(title = track.title, subtitle = subtitle, trial = state.trial)
+                            Spacer(Modifier.height(gap))
+                            SeekArea(
+                                positionMs = state.positionMs,
+                                durationMs = state.durationMs,
+                                onScrub = { scrubPosition = it },
+                                onSeek = {
+                                    seekTo(it)
+                                    scrubPosition = null
+                                },
+                            )
+                            Spacer(Modifier.height(gap))
+                            TransportRow(
+                                isPlaying = state.isPlaying,
+                                canSkip = state.queue.size > 1,
+                                playMode = playMode,
+                                onPlayMode = {
+                                    // 房间里模式是两端共享的：按同一个循环顺序推进一次，交给房间去改
+                                    // （服务端随下一帧广播回来，两端的图标一起变）。
+                                    if (seatHere) {
+                                        container.roomSync.setMode(playMode.next())
+                                    } else {
+                                        container.playbackCenter.cyclePlayMode()
+                                    }
+                                },
+                                onQueue = { showQueue = true },
+                                onPrevious = { previousTrack() },
+                                onToggle = { toggleTransport() },
+                                onNext = { nextTrack() },
+                                playButtonSize = playButtonSize,
+                            )
                         }
-                        Spacer(Modifier.height(12.dp))
-                        TrackInfo(title = track.title, subtitle = subtitle, trial = state.trial)
-                        Spacer(Modifier.height(10.dp))
-                        SeekArea(
-                            positionMs = state.positionMs,
-                            durationMs = state.durationMs,
-                            onScrub = { scrubPosition = it },
-                            onSeek = {
-                                seekTo(it)
-                                scrubPosition = null
-                            },
-                        )
-                        Spacer(Modifier.height(12.dp))
-                        TransportRow(
-                            isPlaying = state.isPlaying,
-                            canSkip = state.queue.size > 1,
-                            playMode = playMode,
-                            onPlayMode = {
-                        // 房间里模式是两端共享的：按同一个循环顺序推进一次，交给房间去改
-                        // （服务端随下一帧广播回来，两端的图标一起变）。
-                        if (seatHere) container.roomSync.setMode(playMode.next()) else container.playbackCenter.cyclePlayMode()
-                    },
-                            onQueue = { showQueue = true },
-                            onPrevious = { previousTrack() },
-                            onToggle = { toggleTransport() },
-                            onNext = { nextTrack() },
-                        )
                     }
 
                     Spacer(Modifier.width(18.dp))
@@ -567,6 +641,10 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                         currentIndex = currentLyricIndex,
                         synced = syncedLyrics,
                         loading = state.lyricLoading,
+                        positionMs = shownPosition,
+                        isPlaying = state.isPlaying && !state.isBuffering,
+                        wordByWord = state.lyricWordByWord,
+                        scrubbing = scrubPosition != null,
                         onSeek = { seekTo(it) },
                         modifier = Modifier
                             .weight(0.58f)
@@ -619,6 +697,10 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     currentIndex = currentLyricIndex,
                     synced = syncedLyrics,
                     loading = state.lyricLoading,
+                    positionMs = shownPosition,
+                    isPlaying = state.isPlaying && !state.isBuffering,
+                    wordByWord = state.lyricWordByWord,
+                    scrubbing = scrubPosition != null,
                     onSeek = { seekTo(it) },
                     modifier = Modifier
                         .weight(1f)
@@ -715,7 +797,8 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
             options = state.qualityOptions ?: Quality.entries,
             // 勾在哪儿代表「之后要用哪一档」——改的是偏好。
             selected = quality,
-            optionLabel = { it.label },
+            // 面板里的完整档位名按当前曲目所属平台取（QQ 客户端叫「HQ 高品质」这类）。
+            optionLabel = { qualityMenuLabel(it, state.activePlatform) },
             optionSubtitle = { option ->
                 // 偏好与实际可能不是一回事：网易云拿不到某一档时不报错，而是"按能给的给"，
                 // 所以「正在播放」只能看 resolve 回来的实际档位，不能照偏好写。
@@ -737,7 +820,7 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
             activePlatform = state.activePlatform ?: Platform.UNKNOWN,
             onDismiss = { showActions = false },
             // 这一行写的是「当前」，所以用实际拿到的档位；还没解析出来时退回偏好（最接近的已知值）。
-            qualityLabel = (state.actualQuality ?: quality).label,
+            qualityLabel = qualityLabel(state.actualQuality ?: quality, state.activePlatform),
             onPickQuality = { showQuality = true },
             onToggleFavorite = {
                 scope.launch {
@@ -1234,7 +1317,11 @@ private fun TransportRow(
     onPrevious: () -> Unit,
     onToggle: () -> Unit,
     onNext: () -> Unit,
+    /** 横屏短屏时按比例缩小整排按键，避免大按钮顶到屏幕下沿被裁。 */
+    playButtonSize: Dp = 70.dp,
 ) {
+    val skipSize = playButtonSize * 0.686f
+    val iconSize = playButtonSize * 0.486f
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -1257,18 +1344,18 @@ private fun TransportRow(
             FilledIconButton(
                 onClick = onPrevious,
                 enabled = canSkip,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(skipSize),
             ) {
                 Icon(Icons.Rounded.SkipPrevious, contentDescription = "上一首")
             }
 
             Spacer(Modifier.width(12.dp))
 
-            FilledIconButton(onClick = onToggle, modifier = Modifier.size(70.dp)) {
+            FilledIconButton(onClick = onToggle, modifier = Modifier.size(playButtonSize)) {
                 Icon(
                     imageVector = if (isPlaying) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
                     contentDescription = if (isPlaying) "暂停" else "播放",
-                    modifier = Modifier.size(34.dp),
+                    modifier = Modifier.size(iconSize),
                 )
             }
 
@@ -1277,7 +1364,7 @@ private fun TransportRow(
             FilledIconButton(
                 onClick = onNext,
                 enabled = canSkip,
-                modifier = Modifier.size(48.dp),
+                modifier = Modifier.size(skipSize),
             ) {
                 Icon(Icons.Rounded.SkipNext, contentDescription = "下一首")
             }
@@ -1296,6 +1383,46 @@ private fun TransportRow(
 /* ------------------------------ 歌词 ------------------------------ */
 
 /**
+ * 逐字歌词用的连续进度。
+ *
+ * 播放器状态是 400ms 轮询一次（见 `PlaybackCenter.startPolling`），拿它直接算逐字进度
+ * 就会一格一格跳。这里以每次状态更新为锚点，用 [withFrameNanos] 在两拍之间按帧插值——
+ * 和网页端 `requestAnimationFrame` + `preciseTime()` 是同一套思路。
+ *
+ * 返回 [State] 而不是值：只有真正订阅它的那一行歌词会逐帧重组，整页不会跟着每帧重画。
+ * 暂停、缓冲、拖动进度、非逐字歌词时都不起帧循环。
+ */
+@Composable
+private fun rememberLyricPositionMs(positionMs: Long, active: Boolean): State<Long> {
+    val live = remember { mutableLongStateOf(positionMs) }
+    val anchorPosition = remember { mutableLongStateOf(positionMs) }
+    val anchorNanos = remember { mutableLongStateOf(System.nanoTime()) }
+
+    // 状态每 400ms 来一拍：重新对齐锚点，seek / 拖动造成的跳变也在这里被吸收。
+    LaunchedEffect(positionMs) {
+        anchorPosition.longValue = positionMs
+        anchorNanos.longValue = System.nanoTime()
+        live.longValue = positionMs
+    }
+
+    LaunchedEffect(active) {
+        if (!active) {
+            live.longValue = positionMs
+            return@LaunchedEffect
+        }
+        while (true) {
+            withFrameNanos { frameTimeNanos ->
+                // 最长只外推 600ms：状态流若被后台卡住，歌词宁可停一下也不要跑飞。
+                val elapsedMs = ((frameTimeNanos - anchorNanos.longValue) / 1_000_000L)
+                    .coerceIn(0L, 600L)
+                live.longValue = anchorPosition.longValue + elapsedMs
+            }
+        }
+    }
+    return live
+}
+
+/**
  * 歌词面板：自动把当前行滚到中间；用户自己拖动时暂停跟随并给一个「回到当前」，
  * 停手 3 秒后恢复。
  */
@@ -1305,12 +1432,35 @@ private fun LyricsBox(
     currentIndex: Int,
     synced: Boolean,
     loading: Boolean,
+    positionMs: Long,
+    isPlaying: Boolean,
+    wordByWord: Boolean,
+    scrubbing: Boolean,
     onSeek: (Long) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val listState = rememberLazyListState()
     var viewportPx by remember { mutableIntStateOf(0) }
     val density = LocalDensity.current
+
+    val livePosition = rememberLyricPositionMs(
+        positionMs = positionMs,
+        active = isPlaying && wordByWord && !scrubbing,
+    )
+    /*
+     * 逐字模式连「换行」也用精确时间：否则 400ms 那一拍还没到时，上一行已经唱完、
+     * 下一行还没亮，中间会出现一段明显的空档。derivedStateOf 只在行号真的变了才通知重组，
+     * 不会因为每帧都在算 activeIndex 而把整块歌词重画一遍。
+     */
+    val effectiveIndex by remember(lyrics, synced, currentIndex, wordByWord) {
+        derivedStateOf {
+            if (synced && wordByWord) {
+                LrcParser.activeIndex(lyrics, livePosition.value)
+            } else {
+                currentIndex
+            }
+        }
+    }
 
     // ── 用户拖动检测 ──
     var userScrolling by remember { mutableStateOf(false) }
@@ -1327,13 +1477,13 @@ private fun LyricsBox(
     // ── 自动滚动：让当前行居中 ──
     // 每行高度是固定的（见 LyricLineRow），所以行高可以直接算，不用两阶段测量。
     // scrollToItem 的偏移是有符号的：正值把这一行往上推，所以 +半行就正好居中。
-    LaunchedEffect(currentIndex, viewportPx, userScrolling) {
-        if (currentIndex >= 0 && viewportPx > 0 && !userScrolling) {
+    LaunchedEffect(effectiveIndex, viewportPx, userScrolling) {
+        if (effectiveIndex >= 0 && viewportPx > 0 && !userScrolling) {
             autoScrolling = true
             val itemHeightPx = with(density) {
                 (LYRIC_LINE_HEIGHT.toPx() + LYRIC_V_PADDING.toPx() * 2).roundToInt()
             }
-            listState.animateScrollToItem(currentIndex, itemHeightPx / 2)
+            listState.animateScrollToItem(effectiveIndex, itemHeightPx / 2)
             autoScrolling = false
         }
     }
@@ -1388,12 +1538,17 @@ private fun LyricsBox(
                     contentPadding = PaddingValues(vertical = halfViewport),
                 ) {
                     itemsIndexed(lyrics) { index, line ->
+                        // 只有当前这一行订阅每帧进度：其它行拿 400ms 那份就够，
+                        // 否则整屏可见歌词都会跟着 60fps 重组。
+                        val isActive = synced && index == effectiveIndex && line.words.isNotEmpty()
                         LyricLineRow(
                             text = line.text,
                             translation = line.trans,
                             timeMs = line.timeMs,
-                            distance = if (synced) abs(index - currentIndex) else 0,
+                            distance = if (synced) abs(index - effectiveIndex) else 0,
                             synced = synced,
+                            words = line.words,
+                            livePosition = if (isActive) livePosition else null,
                             onClick = { if (line.timeMs > 0L) onSeek(line.timeMs) },
                         )
                     }
@@ -1402,7 +1557,7 @@ private fun LyricsBox(
                 // 上下两端渐隐，行滚进滚出卡片边缘时不会生硬地被切掉。
                 LyricFade(MaterialTheme.colorScheme.surfaceContainerLow)
 
-                if (userScrolling && currentIndex >= 0) {
+                if (userScrolling && effectiveIndex >= 0) {
                     FilledTonalButton(
                         onClick = { userScrolling = false },
                         modifier = Modifier
@@ -1435,9 +1590,17 @@ private fun LyricLineRow(
     timeMs: Long,
     distance: Int,
     synced: Boolean,
+    words: List<LyricWord>,
+    livePosition: State<Long>?,
     onClick: () -> Unit,
 ) {
     val isCurrent = distance == 0
+    // 只有当前行会读这个 State；读到的那一帧就是这一行自己的逐字进度。
+    val wordProgress = if (isCurrent && livePosition != null && words.isNotEmpty()) {
+        LrcParser.wordProgress(words, livePosition.value)
+    } else {
+        null
+    }
 
     // 连续衰减：字号 22sp(d=0) → 16sp(远)，透明度 1.0 → 0.2。
     val targetSize = if (!synced) 16f else 16f + 6f / (1f + distance * 1.5f)
@@ -1455,6 +1618,32 @@ private fun LyricLineRow(
         label = "lyricColour",
     )
 
+    /*
+     * 逐字歌词：每个字按演唱进度在「未唱（半透明）→ 已唱（实色）」之间连续过渡，
+     * 而不是到点瞬间整字变色。配合上面的逐帧进度就是卡拉 OK 的顺滑擦除感。
+     *
+     * 网页端靠 CSS background-clip 做字内擦除，Compose 的 SpanStyle 只能给整个字一个
+     * 颜色，所以这里用颜色插值代替；不再 remember 结果——进度每帧都在变，缓存命中不了，
+     * 留着只会白做一次 snapshot 记录。没有字级时间轴时仍是整行一个颜色。
+     */
+    val idleColour = colour.copy(alpha = 0.42f)
+    val lyricText = buildAnnotatedString {
+        if (words.isEmpty() || wordProgress == null) {
+            append(text)
+        } else {
+            words.forEachIndexed { index, word ->
+                val progress = wordProgress.getOrElse(index) { 0f }
+                val start = length
+                append(word.text)
+                addStyle(
+                    SpanStyle(color = lerp(idleColour, colour, progress)),
+                    start,
+                    length,
+                )
+            }
+        }
+    }
+
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -1464,7 +1653,7 @@ private fun LyricLineRow(
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Text(
-            text = text,
+            text = lyricText,
             fontSize = size.sp,
             // 每一行的行高都固定，当前行也不例外：行高变来变去会让列表在焦点移动时抖动，
             // 而且固定之后每项的高度正好可算——居中滚动就是靠这个。

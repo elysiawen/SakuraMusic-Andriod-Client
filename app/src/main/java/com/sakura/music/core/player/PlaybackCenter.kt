@@ -9,18 +9,23 @@ import com.sakura.music.data.cache.CacheManager
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.model.qualityLabel
 import com.sakura.music.data.network.NetworkPolicy
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.prefs.PlaybackSession
 import com.sakura.music.data.prefs.PlaybackSessionStore
+import com.sakura.music.data.prefs.RadioLive
 import com.sakura.music.data.prefs.SettingsStore
 import com.sakura.music.data.remote.SakuraApi
 import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.data.repo.LibraryRepository
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -33,6 +38,18 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.util.concurrent.ConcurrentHashMap
+
+/**
+ * 正在听的电台（私人 FM / 猜你喜欢）。它不是一份歌单，而是会不断往下补的流。
+ *
+ * 与网页端一致：电台流只由 [PlaybackCenter.stopRadio] 结束，空批次只进入冷却重试，
+ * 不因为上游一次抖动就永久停播。
+ */
+data class RadioState(
+    val platform: Platform,
+    /** 网关的电台会话号：服务端据此记住这个电台已经推过哪些歌。 */
+    val session: String = "",
+)
 
 /** 界面看到的播放状态快照。 */
 data class PlaybackState(
@@ -82,6 +99,12 @@ data class PlaybackState(
     val activePlatform: Platform? = null,
     val lyric: List<LyricLine> = emptyList(),
     val lyricLoading: Boolean = false,
+    /** 当前这份歌词带字级时间轴（YRC / QRC），按字高亮；false 时退回按行。 */
+    val lyricWordByWord: Boolean = false,
+    /** 非空 = 这份队列是电台流，快见底时自动续歌，且不回卷到旧歌。 */
+    val radio: RadioState? = null,
+    /** 正在向网关要下一批，挡住 400ms 一拍的轮询打出并发请求。 */
+    val radioLoading: Boolean = false,
 ) {
     val current: UnifiedTrack? get() = queue.getOrNull(index)
 
@@ -136,6 +159,13 @@ class PlaybackCenter(
     private val networkPolicy: NetworkPolicy,
     private val cacheManager: CacheManager,
     private val scope: CoroutineScope,
+    /**
+     * 「这个平台还允许听电台吗」由容器注入（读平台开关偏好）。
+     * 不直接依赖偏好仓库：它与播放器在装配时互相引用，注入一份判定即可避免构造环。
+     */
+    private val radioPlatformAllowed: (Platform) -> Boolean = { true },
+    /** 是否正在「一起听」：电台与房间互斥，覆盖邀请链接、自动回房这些绕过 UI 的路径。 */
+    private val roomActive: () -> Boolean = { false },
 ) {
 
     // MediaController 只能在它被创建的那个线程（主线程）上访问。
@@ -222,6 +252,24 @@ class PlaybackCenter(
      * 构造期注入会变成环；反正只有容器会在一处接上它。
      */
     var roomBridge: RoomPlaybackBridge? = null
+
+    /* ------------------------------ 电台续播 ------------------------------ */
+
+    /** 当前电台；所有读写都发生在主线程（[mainScope]），不用额外加锁。 */
+    private var radio: RadioState? = null
+    /** 上次发起续播的时刻；成功留一个短节流，失败留作 20 秒冷却。 */
+    private var radioRetryAt = 0L
+    /** 提示的节流：别把轮询每一拍都变成一条提示。 */
+    private var radioErrorAt = 0L
+    /** 正在进行的续播；点「下一首」时复用它，不重复打上游。 */
+    private var radioInFlight: Deferred<Int>? = null
+    /** 已经播到队尾、正在等续播：补歌回来后自动接着播。 */
+    private var radioTailStopped = false
+    /**
+     * 电台代数：开/关一次加一。续播请求回来时靠它判断「还是不是刚才那个电台」，
+     * 免得退出后立刻重开同平台时，上一轮在途的批次被追加进新队列。
+     */
+    private var radioGeneration = 0
 
     /**
      * 上一次同步到的当前曲目 key。
@@ -338,6 +386,18 @@ class PlaybackCenter(
                 durationMs = saved.queue.getOrNull(index)?.durationMs ?: 0L,
             )
         }
+
+        // 电台现场跟着队列一起回来：队列里的歌还在，快放完时就能接着自动续。
+        // 退出电台时落盘里的 radioLive 会被立刻删掉，所以这里不会有「已退出的电台复活」。
+        val live = saved.radioLive
+        if (live != null && live.platform.isKnown && radioPlatformAllowed(live.platform) && !roomActive()) {
+            val restored = RadioState(live.platform, live.session)
+            radio = restored
+            _state.update { it.copy(radio = restored) }
+            applyRadioMode(active)
+        } else if (live != null) {
+            clearPersistedRadio()
+        }
     }
 
     private val listener = object : Player.Listener {
@@ -370,6 +430,11 @@ class PlaybackCenter(
             // 队尾播完（循环关闭时才会出现）：同样算「这首结束了」。
             if (playbackState == Player.STATE_ENDED) {
                 _state.value.current?.key?.let { _ended.tryEmit(it) }
+                // 电台是「一路往前」的流：提前续播还没回来时别停在最后一首，补到歌就接着放。
+                if (radio != null && !radioTailStopped) {
+                    radioTailStopped = true
+                    refillRadio(force = true)
+                }
             }
             syncFlags()
         }
@@ -457,6 +522,9 @@ class PlaybackCenter(
                         if (active.isPlaying) persistSession()
                     }
                 }
+                // 电台续播在换歌时触发，失败后的冷却重试则靠这一拍补上；冷却与在途请求都在
+                // maybeRefill 里挡着，400ms 一拍不会打出并发请求。
+                maybeRefill()
                 delay(400)
             }
         }
@@ -551,6 +619,7 @@ class PlaybackCenter(
                 qualityOptions = track.availableQualities,
                 lyric = emptyList(),
                 lyricLoading = false,
+                lyricWordByWord = false,
                 activePlatform = platform,
             )
         }
@@ -565,6 +634,8 @@ class PlaybackCenter(
         // 顺手把封面存到本地：等真要离线听了再去取就来不及了。
         scope.launch { cacheManager.warmUpCover(track.album.cover) }
         scope.launch { runCatching { library.recordPlay(track) } }
+        // 最后一首开始播了才补下一批：首页那批按顺序放完，期间不打扰上游。
+        maybeRefill()
     }
 
     /* ------------------------------ 队列操作 ------------------------------ */
@@ -624,6 +695,8 @@ class PlaybackCenter(
         startPositionMs: Long = 0L,
     ) {
         if (tracks.isEmpty()) return
+        // 单独点一首 / 换一张列表都是明确的新意图，电台流到此结束。
+        stopRadio()
         val track = tracks.getOrNull(startIndex.coerceIn(0, tracks.lastIndex))
         if (track != null && roomBridge?.onPlayTrack(track) == true) return
         playDirect(tracks, startIndex, startPositionMs)
@@ -637,6 +710,8 @@ class PlaybackCenter(
      */
     fun playAll(tracks: List<UnifiedTrack>, startIndex: Int = 0) {
         if (tracks.isEmpty()) return
+        // 用户明确换了队列：否则电台歌会一直往别人的歌单后面追加。
+        stopRadio()
         if (roomBridge?.onReplaceQueue(tracks, startIndex) == true) return
         playDirect(tracks, startIndex, 0L)
     }
@@ -672,6 +747,9 @@ class PlaybackCenter(
             active.play()
             syncQueue()
             syncFlags()
+            // 换队列当场落一次盘：电台刚开播时把「队列 + 电台现场」一起存下来，
+            // 不能等下一次换歌（那一首要几分钟之后）。
+            persistSession()
         }
     }
 
@@ -740,6 +818,7 @@ class PlaybackCenter(
     }
 
     fun clearQueue() {
+        stopRadio()
         mainScope.launch {
             val active = controller ?: return@launch
             active.stop()
@@ -777,6 +856,7 @@ class PlaybackCenter(
                     queue = current.queue,
                     index = current.index.coerceAtLeast(0),
                     positionMs = position,
+                    radioLive = radio?.let { RadioLive(it.platform, it.session) },
                 ),
                 synchronous = synchronous,
             )
@@ -785,9 +865,20 @@ class PlaybackCenter(
 
     /**
      * 暂停 / 恢复「个人现场」的落盘。一起听入房时暂停、退房时恢复。
+     *
+     * 房间与电台互斥：被服务端推进一起听时电台就地结束并给出提示，
+     * 免得后台还在往一个自己再也看不见的队列里续歌。
      */
     fun setPersistencePaused(paused: Boolean) {
         persistencePaused = paused
+        if (paused) {
+            mainScope.launch {
+                if (radio != null) {
+                    stopRadio()
+                    _notice.value = "已进入「一起听」，私人电台已停止"
+                }
+            }
+        }
     }
 
     /** 落盘的那一份个人现场（冷启动时内存里还没有队列，靠它把用户自己的队列找回来）。 */
@@ -896,6 +987,13 @@ class PlaybackCenter(
     }
 
     fun next() {
+        // 电台撞到队尾：通常是提前续播还没回来（网络慢、或用户连点下一首）。
+        // 补歌回来由 doRefill 自动接着播，这里不把电台流结束掉。
+        if (radio != null && _state.value.index >= _state.value.queue.lastIndex) {
+            radioTailStopped = true
+            mainScope.launch { runCatching { refillRadio(force = true).await() } }
+            return
+        }
         mainScope.launch { controller?.seekToNextMediaItem() }
     }
 
@@ -989,6 +1087,12 @@ class PlaybackCenter(
 
     private fun applyPlayMode(mode: PlayMode) {
         val active = controller ?: return
+        // 电台是「一路往前」的流：循环回旧歌、随机跳回听过的都不合语义。
+        // 续播负责往队尾补歌，所以这里必须关掉循环与随机。
+        if (radio != null) {
+            applyRadioMode(active)
+            return
+        }
         // 房间接管期间由房间决定顺序：设置页 / 播放页改了播放模式也不许动播放器，
         // 否则列表循环或单曲循环会在播完一首时抢在服务端之前切歌。
         if (roomPlayMode) return
@@ -1015,6 +1119,224 @@ class PlaybackCenter(
         }
     }
 
+    /* ------------------------------ 电台续播 ------------------------------ */
+
+    /**
+     * 开始听一个平台的电台。
+     *
+     * [initialTracks] 是首页卡片背后那一整批（网易云私人 FM 3 首 / QQ 猜你喜欢 5 首）：
+     * 发现页已经取回来了，卡片只把第一首画成封面。整批直接入队按顺序放完，
+     * **点开时一次电台请求都不打**；最后一首开始播时才由 [maybeRefill] 去要下一批。
+     * 没拿到板块时（例如还没绑定账号）才退化为「现取一批」。
+     */
+    fun startRadio(platform: Platform, initialTracks: List<UnifiedTrack> = emptyList()) {
+        if (roomActive() || persistencePaused) {
+            _notice.value = "正在「一起听」中，请先退出再使用私人电台"
+            return
+        }
+        if (!radioPlatformAllowed(platform)) {
+            _notice.value = "${platform.label}已在设置里关闭，启用后才能使用私人电台"
+            return
+        }
+        mainScope.launch {
+            stopRadio(announce = false)
+            radioGeneration++
+            val started = RadioState(platform)
+            radio = started
+            _state.update { it.copy(radio = started, radioLoading = false) }
+
+            val list = if (initialTracks.isNotEmpty()) {
+                initialTracks
+            } else {
+                fetchRadio(reset = true)
+            }
+            // 请求期间用户可能已经点了别的歌：别把电台歌塞进新队列。
+            if (radio?.platform != platform || list.isEmpty()) {
+                // 接入失败时 fetchRadio 已经说了原因，别再用「已退出电台」盖掉它。
+                if (radio?.platform == platform) stopRadio(announce = false)
+                return@launch
+            }
+            // 刻意不经过 play()：那会清掉刚建立的电台状态（只有用户主动换歌单才该清）。
+            playDirect(list, 0, 0L)
+            controller?.let { applyRadioMode(it) }
+            _notice.value = "私人电台已开始，快听完时会自动续歌"
+        }
+    }
+
+    /** 退出电台：只结束「流」，不动当前队列与进度。 */
+    fun stopRadio(announce: Boolean = true) {
+        val wasActive = radio != null
+        radioGeneration++
+        radio = null
+        radioTailStopped = false
+        radioRetryAt = 0L
+        radioErrorAt = 0L
+        // 不 cancel 在途请求：它可能正运行在 stopRadio 的调用栈里（例如平台开关把电台关掉），
+        // 取消自己会让那一轮续播以异常收场。用代数挡住它写回状态即可。
+        radioInFlight = null
+        _state.update { it.copy(radio = null, radioLoading = false) }
+        if (wasActive) {
+            // 只清内存不够：存档里的电台现场还在，重启就会被读回来。
+            // 没在听电台时不做这次读盘：点歌是高频操作，不该为它解析整份存档。
+            clearPersistedRadio()
+            controller?.let { if (!roomPlayMode) applyPlayMode(personalPlayMode) }
+            if (announce) _notice.value = "已退出私人电台，现在可以使用「一起听」"
+        }
+    }
+
+    /** 平台开关在别处变了（含云端配置同步回来）：切回主线程再判定，避免跨线程读电台状态。 */
+    fun onPlatformPrefsChanged() {
+        mainScope.launch { stopRadioIfBlocked() }
+    }
+
+    /** 平台在设置里被停用（含刷新后从存档恢复的电台）：就地结束电台流。 */
+    fun stopRadioIfBlocked(): Boolean {
+        val state = radio ?: return false
+        if (radioPlatformAllowed(state.platform)) return false
+        stopRadio()
+        _notice.value = "${state.platform.label}已在设置里关闭，私人电台已停止"
+        return true
+    }
+
+    /** 向网关要一批：`reset` 表示新开一个电台，否则带上会话号与整个队列的 key 去重。 */
+    private suspend fun fetchRadio(reset: Boolean): List<UnifiedTrack> {
+        val state = radio ?: return emptyList()
+        val generation = radioGeneration
+        if (_state.value.radioLoading) return emptyList()
+        if (stopRadioIfBlocked()) return emptyList()
+        _state.update { it.copy(radio = state, radioLoading = true) }
+        return try {
+            val batch = api.radio(
+                platform = state.platform,
+                session = if (reset) null else state.session.takeIf { it.isNotBlank() },
+                limit = 6,
+                exclude = if (reset) emptyList() else _state.value.queue.map { it.key },
+            )
+            // 请求期间用户可能换了平台或退出了电台：只在这个电台还活着时写回状态。
+            val live = radio
+            if (generation == radioGeneration && live != null && live.platform == state.platform) {
+                val next = live.copy(session = batch.session)
+                radio = next
+                _state.update { it.copy(radio = next, radioLoading = false) }
+                // 新开电台时队列还没装进播放器，别在这时写一份「旧队列 + 新电台」的存档；
+                // startRadio 装好队列后会自己落一次盘。
+                if (!reset) persistSession()
+            } else {
+                _state.update { it.copy(radioLoading = false) }
+            }
+            batch.items
+        } catch (error: CancellationException) {
+            _state.update { it.copy(radioLoading = false) }
+            throw error
+        } catch (error: Exception) {
+            radioRetryAt = System.currentTimeMillis()
+            _state.update { it.copy(radioLoading = false) }
+            if (reset) {
+                _notice.value = "电台接入失败：${error.friendlyMessage()}"
+            } else if (System.currentTimeMillis() - radioErrorAt > 60_000L) {
+                radioErrorAt = System.currentTimeMillis()
+                _notice.value = "电台续播失败：${error.friendlyMessage()}；稍后会自动重试，或点「下一首」立即再试"
+            }
+            emptyList()
+        }
+    }
+
+    /** 追加一批新歌，返回实际加进去的条数。在途时复用同一个请求，不重复打上游。 */
+    private fun refillRadio(force: Boolean): Deferred<Int> {
+        radioInFlight?.let { return it }
+        val pending = mainScope.async { doRefill(force) }
+        radioInFlight = pending
+        mainScope.launch {
+            runCatching { pending.await() }
+            if (radioInFlight == pending) radioInFlight = null
+        }
+        return pending
+    }
+
+    private suspend fun doRefill(force: Boolean): Int {
+        val state = radio ?: return 0
+        val generation = radioGeneration
+        if (roomActive() || persistencePaused) return 0
+        if (stopRadioIfBlocked()) return 0
+        if (!force && System.currentTimeMillis() - radioRetryAt < RADIO_RETRY_MS) return 0
+
+        val items = fetchRadio(reset = false)
+        // 请求期间用户可能换了歌单 / 退出了电台（甚至又开了同平台的新电台）：
+        // 代数或平台对不上就整批丢弃，绝不能把旧批歌塞进新队列。
+        if (generation != radioGeneration || radio?.platform != state.platform) return 0
+
+        val existing = _state.value.queue.map { it.key }.toSet()
+        val fresh = items.filter { it.key !in existing }
+        val added = appendRadioTracks(fresh)
+        // 补成功也留一个短节流：上游偶尔只给得出 1~2 首时，下一拍轮询不该立刻又要一批。
+        radioRetryAt = System.currentTimeMillis()
+
+        if (added > 0) {
+            // 之前已经播到队尾停下了：补歌到了就自动接上，不等用户再点一下。
+            if (radioTailStopped) {
+                radioTailStopped = false
+                controller?.let { active ->
+                    val nextIndex = (active.currentMediaItemIndex + 1)
+                        .coerceAtMost((active.mediaItemCount - 1).coerceAtLeast(0))
+                    active.seekTo(nextIndex, 0L)
+                    active.play()
+                }
+            }
+        } else {
+            // 空批次 / 请求失败只进入冷却，不等于电台枯竭：一次抖动不该永久停播。
+            if (System.currentTimeMillis() - radioErrorAt > 60_000L) {
+                radioErrorAt = System.currentTimeMillis()
+                _notice.value = "电台这批没有新歌，稍后会自动重试；也可以点「下一首」立即再试"
+            }
+            // 停在队尾时换歌事件不会再触发，显式排一次延时重试。
+            if (_state.value.index >= _state.value.queue.lastIndex) {
+                mainScope.launch {
+                    delay(RADIO_RETRY_MS)
+                    maybeRefill()
+                }
+            }
+        }
+        return added
+    }
+
+    private fun appendRadioTracks(items: List<UnifiedTrack>): Int {
+        if (items.isEmpty()) return 0
+        val active = controller ?: return 0
+        active.addMediaItems(itemsOf(items))
+        syncQueue()
+        persistSession()
+        return items.size
+    }
+
+    /** 最后一首开始播了才补下一批：首页那批按顺序放完，期间不打扰上游。 */
+    private fun maybeRefill() {
+        if (stopRadioIfBlocked()) return
+        val state = radio ?: return
+        if (_state.value.radioLoading || radioInFlight?.isActive == true) return
+        if (roomActive() || persistencePaused) return
+        if (System.currentTimeMillis() - radioRetryAt < RADIO_RETRY_MS) return
+        val queue = _state.value.queue
+        val index = _state.value.index
+        if (index < 0 || queue.isEmpty()) return
+        if (queue.lastIndex - index > RADIO_REFILL_AHEAD) return
+        radioRetryAt = System.currentTimeMillis() // 立刻占位，下一拍不会重复发
+        Log.i(LOG_TAG, "电台续播触发：${state.platform.id}，队列剩 ${queue.lastIndex - index} 首")
+        refillRadio(force = true)
+    }
+
+    /** 电台是一路往前的流：不循环、不随机跳回听过的歌。 */
+    private fun applyRadioMode(active: MediaController) {
+        active.repeatMode = Player.REPEAT_MODE_OFF
+        active.shuffleModeEnabled = false
+    }
+
+    /** 只从落盘里抹掉电台现场，不动队列与进度（房间接管期间落盘是暂停的，得单独写一次）。 */
+    private fun clearPersistedRadio() {
+        val saved = sessionStore.load() ?: return
+        if (saved.radioLive == null) return
+        sessionStore.save(saved.copy(radioLive = null), synchronous = true)
+    }
+
     /* ------------------------------ 歌词 ------------------------------ */
 
     private suspend fun loadLyrics(track: UnifiedTrack) {
@@ -1022,18 +1344,31 @@ class PlaybackCenter(
         val key = "${source.platform.id}:${source.id}"
 
         lyricCache[key]?.let { cached ->
-            _state.update { it.copy(lyric = cached, lyricLoading = false) }
+            _state.update {
+                it.copy(
+                    lyric = cached,
+                    lyricWordByWord = cached.any { line -> line.words.isNotEmpty() },
+                    lyricLoading = false,
+                )
+            }
             return
         }
 
         _state.update { it.copy(lyricLoading = true) }
         val lines = runCatching {
             val result = api.lyric(source.platform, source.id)
-            LrcParser.parse(result.lrc, result.trans, result.roma)
+            // 逐字歌词与按行歌词同时保留：解析不出字级时间轴时 parseResult 自动按行降级。
+            LrcParser.parseResult(result.lrc, result.trans, result.roma, result.yrc, result.qrc)
         }.getOrDefault(emptyList())
 
         if (lines.isNotEmpty()) lyricCache[key] = lines
-        _state.update { it.copy(lyric = lines, lyricLoading = false) }
+        _state.update {
+            it.copy(
+                lyric = lines,
+                lyricWordByWord = lines.any { line -> line.words.isNotEmpty() },
+                lyricLoading = false,
+            )
+        }
     }
 
     /* ------------------------------ 试听 / 直连提示 ------------------------------ */
@@ -1098,7 +1433,10 @@ class PlaybackCenter(
         if (actual == null || actual == requested || trial) return
         if (controller?.playWhenReady != true) return
         if (!notifiedDowngrades.add("${requested.id}>${actual.id}")) return
-        _notice.value = "「${requested.label}」暂不可用，已按「${actual.label}」播放"
+        // 档位名按平台取，与音质面板里的叫法保持同一套（QQ 那边 high 叫「HQ」）。
+        val platform = _state.value.activePlatform
+        _notice.value = "「${qualityLabel(requested, platform)}」暂不可用，" +
+            "已按「${qualityLabel(actual, platform)}」播放"
     }
 
     /**
@@ -1153,3 +1491,9 @@ private const val LOG_TAG = "SakuraPlayback"
  * 长一点的歌差得非常明显，中间这些情况不该被误判。
  */
 private const val FRAGMENT_DURATION_RATIO = 0.8
+
+/** 只剩最后一首时才补下一批：首页那 3~5 首要按顺序放完，留一整首歌的时间给网络。 */
+private const val RADIO_REFILL_AHEAD = 0
+
+/** 续播失败后的冷却：别让 400ms 一拍的轮询把上游打进风控。 */
+private const val RADIO_RETRY_MS = 20_000L
