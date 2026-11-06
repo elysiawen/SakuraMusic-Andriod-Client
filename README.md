@@ -54,7 +54,7 @@ GitHub Actions 每次构建都会自动做前两步。本地漏了这一步，`a
 目录结构、共享协议和新增效果的步骤见 [`nowplaying-web/README.md`](nowplaying-web/README.md)。
 
 Release 签名材料（`keystore.properties` 与 `keystore/`）**不入库**，见 `.gitignore`；
-没有它们时打出来的包不签名，而不是构建失败。
+本地没有它们时打出来的包不签名，而不是构建失败（CI 上已配置 Secrets，产出的是签名包）。
 
 网关地址默认取 `gradle.properties` 里的 `sakura.gateway.url`，
 也可以在应用内「设置 → 网络」里改，或用 `-Psakura.gateway.url=...` 覆盖。
@@ -67,7 +67,7 @@ Release 签名材料（`keystore.properties` 与 `keystore/`）**不入库**，�
 | `release.yml` | **push 到 `main` / `master`**、手动 | 同样先生成 Web 产物 → 编译 Release APK → 上传 artifact 并创建 GitHub Release |
 
 每次 push 到主分支都会自动出一个 Release：标题 `Release YYYYMMDD`（UTC+8 日期），正文列出
-版本号、构建时间、Commit 与签名状态。同一天多次 push 用 `release-<日期>-<短 sha>` 作为唯一 tag，
+版本号、构建时间、Commit。同一天多次 push 用 `release-<日期>-<短 sha>` 作为唯一 tag，
 标题不变；如果只想按 tag 发版，把 `release.yml` 的 `on.push` 改回 `tags: ['v*']` 即可。
 
 APK 在对应 Actions 运行页的 **Artifacts** 里下载，也会挂在 Release 附件上。仓库里**只有源码**，
@@ -77,10 +77,12 @@ APK 在对应 Actions 运行页的 **Artifacts** 里下载，也会挂在 Releas
 **提交时**：把 `nowplaying-web/`（源码）和 `.github/workflows/` 加进 Git 即可，生成的 assets
 不需要 `git add`，也不存在「源码改了、产物忘了重新 build」的漂移。
 
-### Release 签名（可选）
+### Release 签名
 
-未配置 Secrets 时产出的是未签名包（`app-release-unsigned.apk`），只能自测。要出可直接覆盖安装的
-签名包，在仓库 `Settings → Secrets and variables → Actions` 里添加：
+本仓库已配置签名 Secrets，每次 push 到主分支产出的都是可直接覆盖安装的签名包，Release 正文不再
+标注签名状态。本地没有 `keystore/` 与 `keystore.properties` 时打出来的包不签名，仅能自测。
+
+要让自己 fork 出的仓库也出签名包，在 `Settings → Secrets and variables → Actions` 里添加：
 
 | Secret | 值 |
 | --- | --- |
