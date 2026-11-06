@@ -49,8 +49,9 @@ jobs:
       # AGP 8.7.3 + compileSdk 36；build-tools 由 AGP 按需下载（licenses 已接受）。
       - name: 安装 compileSdk 36 平台
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" > /dev/null
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-36" > /dev/null
 
       - uses: gradle/actions/setup-gradle@v4
         with:

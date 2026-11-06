@@ -63,8 +63,9 @@ jobs:
       # 在 cmdline-tools 16.0 上直接失败。ubuntu-latest 已预装 SDK + cmdline-tools。
       - name: 安装 compileSdk 36 平台
         run: |
-          yes | sdkmanager --licenses > /dev/null || true
-          sdkmanager "platforms;android-36" > /dev/null
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-36" > /dev/null
 
       - uses: gradle/actions/setup-gradle@v4
 
