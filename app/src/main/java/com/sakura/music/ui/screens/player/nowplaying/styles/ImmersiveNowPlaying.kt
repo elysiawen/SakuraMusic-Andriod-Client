@@ -45,9 +45,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.sakura.music.core.player.AudioSessionBridge
 import com.sakura.music.ui.screens.player.nowplaying.NowPlayingActions
 import com.sakura.music.ui.screens.player.nowplaying.NowPlayingSkin
 import com.sakura.music.ui.screens.player.nowplaying.NowPlayingUiState
+import com.sakura.music.ui.screens.player.nowplaying.common.AudioSpectrum
 import com.sakura.music.ui.screens.player.nowplaying.common.CoverPalette
 import com.sakura.music.ui.screens.player.nowplaying.common.DesktopControlCard
 import com.sakura.music.ui.screens.player.nowplaying.common.DesktopCover
@@ -58,6 +61,7 @@ import com.sakura.music.ui.screens.player.nowplaying.common.DesktopRouteTag
 import com.sakura.music.ui.screens.player.nowplaying.common.DesktopTag
 import com.sakura.music.ui.screens.player.nowplaying.common.NowPlayingTopBar
 import com.sakura.music.ui.screens.player.nowplaying.common.immersiveDesktopPalette
+import com.sakura.music.ui.screens.player.nowplaying.common.rememberAudioSpectrum
 import com.sakura.music.ui.screens.player.nowplaying.common.rememberCoverPalette
 import kotlin.math.abs
 import kotlin.math.cos
@@ -73,9 +77,10 @@ private const val SPECTRUM_BARS = 56
  * 沉浸模式（网页端 `ImmersiveMode`）：封面取色后的色块在暗底上漂移呼吸，
  * 底部是左右镜像的频谱，中间留一整块给大字歌词。
  *
- * 网页端用 Web Audio 取真实频谱；安卓端音频躺在后台服务里拿不到采样，
- * 先用同一套模拟节拍公式（低频双正弦 + 柱状摆动），真实频谱留待二期。
- * 节拍按 Δt 推进（60/120Hz 观感一致），暂停后缓缓停住；频谱柱单独平滑。
+ * 频谱优先用 Visualizer 的真实 FFT：播放服务把 audioSessionId 发布出来，界面按会话
+ * 采集并做对数分频，得到 56 根跟着音乐走的柱。没录音权限、会话失效或设备不支持时
+ * 自动回退模拟节拍。背景色块的呼吸始终走模拟节拍（按 Δt 推进，60/120Hz 观感一致），
+ * 暂停后缓缓停住。
  */
 @Composable
 fun ImmersiveNowPlaying(
@@ -92,6 +97,8 @@ fun ImmersiveNowPlaying(
         )
     }
     val coverPalette = rememberCoverPalette(state.track.album.cover)
+    val audioSessionId by AudioSessionBridge.sessionId.collectAsStateWithLifecycle()
+    val spectrum = rememberAudioSpectrum(sessionId = audioSessionId, barCount = SPECTRUM_BARS)
     val beat = rememberImmersiveBeat(state.isPlaying && !state.isBuffering)
 
     BoxWithConstraints(
@@ -111,6 +118,8 @@ fun ImmersiveNowPlaying(
             palette = palette,
             cover = coverPalette,
             beat = beat,
+            // 暂停 / 缓冲时交回模拟值，让它平滑收住，柱子不会卡在暂停前那一帧。
+            spectrum = spectrum?.takeIf { state.isPlaying && !state.isBuffering },
             modifier = Modifier
                 .fillMaxWidth()
                 .height(spectrumHeight)
@@ -185,12 +194,15 @@ fun ImmersiveNowPlaying(
 
 /* ------------------------------ 节拍时钟 ------------------------------ */
 
-/** 模拟节拍：色块与频谱共用同一组数，和网页端的 bassSmooth / playLevel 同源。 */
+/**
+ * 模拟节拍：驱动背景色块呼吸，也是频谱拿不到真实数据时的回退柱值，
+ * 和网页端的 bassSmooth / playLevel 同源。
+ */
 private class ImmersiveBeat {
     var clock by mutableFloatStateOf(0f)
     var bass by mutableFloatStateOf(0.06f)
     var level by mutableFloatStateOf(0f)
-    /** 每根频谱柱的平滑值，避免把 sin 抖动直接写进柱高（对齐网页端 bars[]）。 */
+    /** 回退用的每根柱值，避免把 sin 抖动直接写进柱高（对齐网页端 bars[]）。 */
     val bars = FloatArray(SPECTRUM_BARS)
 }
 
@@ -357,6 +369,7 @@ private fun Spectrum(
     palette: DesktopPalette,
     cover: CoverPalette?,
     beat: ImmersiveBeat,
+    spectrum: AudioSpectrum?,
     modifier: Modifier = Modifier,
 ) {
     val colors = blobColors(cover, palette)
@@ -367,6 +380,8 @@ private fun Spectrum(
             alpha = 0.85f
         },
     ) {
+        // 必须读在 draw 里：beat.clock 每帧推进会触发重绘，真实数据才跟着刷新。
+        val live = spectrum?.snapshot()
         // 渐变随节拍缓慢横向漂移：既让色带不死板，也建立逐帧重绘的依赖。
         val drift = sin(beat.clock * 0.5f) * size.width * 0.12f
         val brush = Brush.horizontalGradient(
@@ -384,8 +399,8 @@ private fun Spectrum(
         val maxH = size.height * 0.92f
         val cap = min(barWidth * 0.72f, 3.dp.toPx())
         for (i in 0 until SPECTRUM_BARS) {
-            // 取时钟里已按 Δt 平滑过的柱值，不再把 sin 抖动直接写进柱高。
-            val value = beat.bars[i]
+            // 有真实 FFT 就用它；没权限 / 会话失效时回退到已按 Δt 平滑过的模拟值。
+            val value = if (live != null && i < live.size) live[i] else beat.bars[i]
             if (value < 0.01f) continue
             val barH = max(cap * 2f, value * maxH)
             val y = size.height - barH

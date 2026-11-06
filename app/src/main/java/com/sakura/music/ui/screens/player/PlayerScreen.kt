@@ -70,6 +70,7 @@ import com.sakura.music.ui.components.TrackActionsSheet
 import com.sakura.music.ui.navigation.SakuraNavigator
 import com.sakura.music.ui.screens.player.nowplaying.NowPlayingActions
 import com.sakura.music.ui.screens.player.nowplaying.NowPlayingUiState
+import com.sakura.music.ui.screens.player.nowplaying.common.NowPlayingSystemBars
 import com.sakura.music.ui.screens.player.nowplaying.common.subtitleWithLinks
 import com.sakura.music.ui.screens.player.nowplaying.styles.ClassicNowPlaying
 import com.sakura.music.ui.screens.player.nowplaying.styles.ImmersiveNowPlaying
@@ -342,6 +343,9 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
             }
         },
     )
+
+    // 沉浸 / 雾窗是固定深色画布，系统栏图标不能跟着应用的浅色主题走。
+    NowPlayingSystemBars(style)
 
     Box(
         modifier = Modifier

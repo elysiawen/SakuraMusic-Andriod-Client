@@ -5,6 +5,7 @@ import android.content.Intent
 import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.analytics.AnalyticsListener
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory
 import androidx.media3.session.MediaSession
 import androidx.media3.session.MediaSessionService
@@ -44,6 +45,18 @@ class MusicPlaybackService : MediaSessionService() {
             .setHandleAudioBecomingNoisy(true)
             .build()
 
+        // Visualizer 只能绑在真实的 audio session 上，而这个 id 只有 ExoPlayer 自己知道；
+        // 建完先发布一次，之后切音轨 / 换输出导致会话重建时再跟着更新。
+        AudioSessionBridge.publish(player.audioSessionId)
+        player.addAnalyticsListener(object : AnalyticsListener {
+            override fun onAudioSessionIdChanged(
+                eventTime: AnalyticsListener.EventTime,
+                audioSessionId: Int,
+            ) {
+                AudioSessionBridge.publish(audioSessionId)
+            }
+        })
+
         // 「与其他应用一起播放」打开时不再抢音频焦点，两边各放各的。
         // 设置是异步读的，所以第一下可能还是按默认（抢焦点）走，读出来立刻改过来——
         // 那时候通常还没开始播。
@@ -75,6 +88,7 @@ class MusicPlaybackService : MediaSessionService() {
             release()
         }
         mediaSession = null
+        AudioSessionBridge.clear()
         super.onDestroy()
     }
 

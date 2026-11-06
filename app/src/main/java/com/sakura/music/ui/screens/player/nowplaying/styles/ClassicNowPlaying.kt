@@ -151,8 +151,7 @@ fun ClassicNowPlaying(
                             collapseGesture = collapseGesture,
                             modifier = Modifier
                                 .width(coverSize + 18.dp)
-                                .fillMaxHeight()
-                                .padding(top = 28.dp),
+                                .fillMaxHeight(),
                         )
                         Spacer(Modifier.width(36.dp))
                         DesktopLyricStage(
@@ -266,6 +265,9 @@ private fun Aside(
         modifier = modifier,
         horizontalAlignment = Alignment.Start,
     ) {
+        // 上下等权留白，让「封面 + 标题 + 标签」这一组在左侧栏里垂直居中，
+        // 不再贴着顶栏。
+        Spacer(Modifier.weight(1f))
         Box(
             modifier = Modifier
                 .size(coverSize)

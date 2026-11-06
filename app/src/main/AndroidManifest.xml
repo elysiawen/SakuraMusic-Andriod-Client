@@ -9,6 +9,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <!-- 后台播放。Android 14+ 要求权限与服务声明同时存在。 -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- 沉浸样式的真实频谱：Visualizer 需要它才能读音频会话，仅本机分析，不录音、不上传。 -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
 
     <application
         android:name=".MusicApp"
