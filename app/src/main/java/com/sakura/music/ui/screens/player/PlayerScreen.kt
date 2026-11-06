@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -89,8 +90,12 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.text.drawText
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -107,6 +112,7 @@ import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.text.style.TextAlign
@@ -114,6 +120,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withLink
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -1595,9 +1602,16 @@ private fun LyricLineRow(
     onClick: () -> Unit,
 ) {
     val isCurrent = distance == 0
-    // 只有当前行会读这个 State；读到的那一帧就是这一行自己的逐字进度。
-    val wordProgress = if (isCurrent && livePosition != null && words.isNotEmpty()) {
-        LrcParser.wordProgress(words, livePosition.value)
+    /*
+     * 当前行 + 有逐字歌词时始终走 WordByWordText。livePosition 偶发为 null（synced 抖动、
+     * isActive 切换间隙）时用全 0 进度兜底，不要回退到整行单色 Text——否则会闪一帧全亮。
+     */
+    val wordProgress = if (isCurrent && words.isNotEmpty()) {
+        if (livePosition != null) {
+            LrcParser.wordProgress(words, livePosition.value)
+        } else {
+            FloatArray(words.size) { 0f }
+        }
     } else {
         null
     }
@@ -1619,6 +1633,25 @@ private fun LyricLineRow(
     )
 
     /*
+     * 当前行用主题色渐变（primary → secondary）+ 发光阴影 + 轻微放大，
+     * 和桌面端 Classic 模式的观感对齐；非当前行保持单色。
+     */
+    val textBrush: Brush? = if (isCurrent) {
+        Brush.linearGradient(
+            listOf(
+                MaterialTheme.colorScheme.primary,
+                MaterialTheme.colorScheme.secondary,
+            ),
+        )
+    } else null
+
+    val scale by animateFloatAsState(
+        targetValue = if (isCurrent) 1.045f else 1f,
+        animationSpec = lyricTransition,
+        label = "lyricScale",
+    )
+
+    /*
      * 逐字歌词：每个字按演唱进度在「未唱（半透明）→ 已唱（实色）」之间连续过渡，
      * 而不是到点瞬间整字变色。配合上面的逐帧进度就是卡拉 OK 的顺滑擦除感。
      *
@@ -1627,12 +1660,11 @@ private fun LyricLineRow(
      * 留着只会白做一次 snapshot 记录。没有字级时间轴时仍是整行一个颜色。
      */
     val idleColour = colour.copy(alpha = 0.42f)
-    val lyricText = buildAnnotatedString {
-        if (words.isEmpty() || wordProgress == null) {
-            append(text)
-        } else {
+    val hasWordProgress = words.isNotEmpty() && wordProgress != null
+    val lyricText = if (hasWordProgress) {
+        buildAnnotatedString {
             words.forEachIndexed { index, word ->
-                val progress = wordProgress.getOrElse(index) { 0f }
+                val progress = wordProgress!!.getOrElse(index) { 0f }
                 val start = length
                 append(word.text)
                 addStyle(
@@ -1642,6 +1674,8 @@ private fun LyricLineRow(
                 )
             }
         }
+    } else {
+        null
     }
 
     Column(
@@ -1649,26 +1683,60 @@ private fun LyricLineRow(
             .fillMaxWidth()
             .clickable(enabled = synced && timeMs > 0L, onClick = onClick)
             .padding(vertical = LYRIC_V_PADDING, horizontal = 16.dp)
-            .graphicsLayer { this.alpha = alpha },
+            .graphicsLayer {
+                this.alpha = alpha
+                this.scaleX = scale
+                this.scaleY = scale
+            },
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            text = lyricText,
-            fontSize = size.sp,
-            // 每一行的行高都固定，当前行也不例外：行高变来变去会让列表在焦点移动时抖动，
-            // 而且固定之后每项的高度正好可算——居中滚动就是靠这个。
-            lineHeight = LYRIC_LINE_HEIGHT,
-            fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
-            color = colour,
-            textAlign = TextAlign.Center,
-            style = TextStyle(
-                // Trim.Both 裁掉字体上下自带的空隙，渲染高度才与 lineHeight 一致。
-                lineHeightStyle = LineHeightStyle(
-                    alignment = LineHeightStyle.Alignment.Center,
-                    trim = LineHeightStyle.Trim.Both,
+        if (isCurrent && hasWordProgress) {
+            // 当前行 + 逐字歌词：用 Canvas 画字内擦除（左半主题色、右半半透），
+            // 模拟桌面端 CSS background-clip:text 的卡拉 OK 效果。
+            WordByWordText(
+                text = text,
+                words = words,
+                wordProgress = wordProgress!!,
+                fontSize = size.sp,
+                lineHeight = LYRIC_LINE_HEIGHT,
+                fontWeight = FontWeight.Bold,
+                activeColor = colour,
+                idleColor = idleColour,
+            )
+        } else if (lyricText != null) {
+            // 非当前行但有逐字歌词：用 AnnotatedString 逐字插值上色。
+            Text(
+                text = lyricText,
+                fontSize = size.sp,
+                lineHeight = LYRIC_LINE_HEIGHT,
+                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                color = colour,
+                textAlign = TextAlign.Center,
+                style = TextStyle(
+                    lineHeightStyle = LineHeightStyle(
+                        alignment = LineHeightStyle.Alignment.Center,
+                        trim = LineHeightStyle.Trim.Both,
+                    ),
                 ),
-            ),
-        )
+            )
+        } else {
+            // 无逐字歌词：当前行用渐变文字色（brush 放 TextStyle 里）。
+            Text(
+                text = text,
+                fontSize = size.sp,
+                lineHeight = LYRIC_LINE_HEIGHT,
+                fontWeight = if (isCurrent) FontWeight.Bold else FontWeight.Normal,
+                color = colour,
+                textAlign = TextAlign.Center,
+                style = TextStyle(
+                    brush = textBrush,
+                    lineHeightStyle = LineHeightStyle(
+                        alignment = LineHeightStyle.Alignment.Center,
+                        trim = LineHeightStyle.Trim.Both,
+                    ),
+                ),
+            )
+        }
         translation?.takeIf { it.isNotBlank() }?.let { translated ->
             Text(
                 text = translated,
@@ -1677,6 +1745,87 @@ private fun LyricLineRow(
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(top = 2.dp),
             )
+        }
+    }
+}
+
+/**
+ * 逐字擦除歌词：每个字的左半（已唱）是主题色，右半（未唱）是半透明色，
+ * 分界点随演唱进度从左往右推进，还原桌面端 CSS `background-clip: text` 的卡拉 OK 观感。
+ *
+ * 实现思路：先用 [TextMeasurer] 量出每个字在布局里的边界框，然后在 Canvas 上
+ *  1) 整行画一遍「未唱」色；
+ *  2) 逐字用 [clipRect] 裁掉右半，再画一遍「已唱」色。
+ * 两层叠加就是字内从左到右的擦除渐变。
+ *
+ * 文字布局只随 [text] / 字号 / 字重变化，不随每帧进度重测；只有 Canvas 绘制随
+ * [wordProgress] 每帧重画，因此当前行 60fps 也不会触发文字重排。
+ */
+@Composable
+private fun WordByWordText(
+    text: String,
+    words: List<LyricWord>,
+    wordProgress: FloatArray,
+    fontSize: TextUnit,
+    lineHeight: TextUnit,
+    fontWeight: FontWeight,
+    activeColor: Color,
+    idleColor: Color,
+) {
+    val textMeasurer = rememberTextMeasurer()
+    val density = LocalDensity.current
+    val textStyle = TextStyle(
+        fontSize = fontSize,
+        lineHeight = lineHeight,
+        fontWeight = fontWeight,
+        textAlign = TextAlign.Center,
+        lineHeightStyle = LineHeightStyle(
+            alignment = LineHeightStyle.Alignment.Center,
+            trim = LineHeightStyle.Trim.Both,
+        ),
+    )
+
+    val layoutResult = remember(text, fontSize, fontWeight, lineHeight) {
+        textMeasurer.measure(AnnotatedString(text), style = textStyle)
+    }
+
+    Canvas(modifier = Modifier.fillMaxWidth().height(with(density) { lineHeight.toDp() })) {
+        // 居中：Canvas 宽度减去文字宽度，余量平分到左右。
+        val textLeft = (size.width - layoutResult.size.width) / 2f
+        val textTop = 0f
+
+        // 1) 整行先画未唱色（半透），作为底色。
+        drawText(
+            textLayoutResult = layoutResult,
+            color = idleColor,
+            topLeft = Offset(textLeft, textTop),
+        )
+
+        // 2) 每个字裁剪已唱区域，叠画主题色。
+        var charIndex = 0
+        words.forEachIndexed { wordIndex, word ->
+            val wordLen = word.text.length
+            if (wordLen == 0) return@forEachIndexed
+            val firstBox = layoutResult.getBoundingBox(charIndex)
+            val lastBox = layoutResult.getBoundingBox(charIndex + wordLen - 1)
+            val wordLeft = textLeft + firstBox.left
+            val wordRight = textLeft + lastBox.right
+            val progress = wordProgress.getOrElse(wordIndex) { 0f }
+            val clipRight = wordLeft + (wordRight - wordLeft) * progress
+
+            clipRect(
+                left = wordLeft,
+                top = textTop + firstBox.top,
+                right = clipRight,
+                bottom = textTop + lastBox.bottom,
+            ) {
+                drawText(
+                    textLayoutResult = layoutResult,
+                    color = activeColor,
+                    topLeft = Offset(textLeft, textTop),
+                )
+            }
+            charIndex += wordLen
         }
     }
 }
