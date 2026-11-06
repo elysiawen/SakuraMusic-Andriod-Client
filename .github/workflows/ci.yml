@@ -1,0 +1,69 @@
+name: Android CI
+
+on:
+  # 主分支的 push 由 release.yml 负责（会连带编译 Release 包），避免重复构建。
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: 生成 Web 产物并编译 Debug APK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 仓库只放源码：assets 不入库，每次构建都从 effects/ 现场生成。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: nowplaying-web/package-lock.json
+
+      - name: 生成 Web 效果 assets
+        working-directory: nowplaying-web
+        run: |
+          npm ci
+          npm run build
+
+      - name: 确认产物已生成
+        run: |
+          if ! ls app/src/main/assets/nowplaying/*/index.html >/dev/null 2>&1; then
+            echo "::error::Web 构建没有产出 index.html；Gradle 的 checkWebAssets 也会拦下这次构建。"
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      # AGP 8.7.3 + compileSdk 36；build-tools 由 AGP 按需下载（licenses 已接受）。
+      - name: 安装 compileSdk 36 平台
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" > /dev/null
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' }}
+
+      - name: assembleDebug
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sakura-music-debug-${{ github.sha }}
+          path: app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 14

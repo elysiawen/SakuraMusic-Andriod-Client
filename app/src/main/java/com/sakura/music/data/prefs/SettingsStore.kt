@@ -37,6 +37,8 @@ class SettingsStore(private val context: Context) {
         val ThemeMode = stringPreferencesKey("theme_mode")
         /** 详情页头部版式（沉浸式 / 经典）。 */
         val DetailHeader = stringPreferencesKey("detail_header_style")
+        /** 全屏播放页样式（原生 / 经典 / 沉浸 / 雾窗）。 */
+        val NowPlaying = stringPreferencesKey("now_playing_style")
         val Quality = stringPreferencesKey("quality")
         val PlayMode = stringPreferencesKey("play_mode")
         /** 是否与其他应用同时出声（不抢占音频焦点）。 */
@@ -108,6 +110,9 @@ class SettingsStore(private val context: Context) {
 
     val detailHeaderStyle: Flow<DetailHeaderStyle> = context.settingsDataStore.data
         .map { DetailHeaderStyle.fromId(it[Keys.DetailHeader]) }
+
+    val nowPlayingStyle: Flow<NowPlayingStyle> = context.settingsDataStore.data
+        .map { NowPlayingStyle.fromId(it[Keys.NowPlaying]) }
 
     val quality: Flow<Quality> = context.settingsDataStore.data
         .map { Quality.fromId(it[Keys.Quality]) }
@@ -196,6 +201,10 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setDetailHeaderStyle(value: DetailHeaderStyle) = edit {
         it[Keys.DetailHeader] = value.id
+    }
+
+    suspend fun setNowPlayingStyle(value: NowPlayingStyle) = edit {
+        it[Keys.NowPlaying] = value.id
     }
 
     suspend fun setQuality(value: Quality) = edit { it[Keys.Quality] = value.id }

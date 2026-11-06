@@ -1,5 +1,7 @@
 # SakuraMusic-Andriod-Client
 
+[![Android CI](https://github.com/elysiawen/SakuraMusic-Andriod-Client/actions/workflows/ci.yml/badge.svg)](https://github.com/elysiawen/SakuraMusic-Andriod-Client/actions/workflows/ci.yml)
+
 Sakura Music 的 Android 客户端。Kotlin + Jetpack Compose + Media3（ExoPlayer），
 播放器活在前台服务里，界面只是它的遥控器。
 
@@ -36,8 +38,59 @@ Sakura Music 的 Android 客户端。Kotlin + Jetpack Compose + Media3（ExoPlay
 ./gradlew assembleRelease
 ```
 
+播放页的 Web 效果源码在 `nowplaying-web/`，产物写到 `app/src/main/assets/nowplaying/<效果 id>/`，
+**不入库**（见 `.gitignore`）。Gradle 不跑 Node，所以 clone 后要先生成一次 assets 再编译：
+
+```bash
+cd nowplaying-web
+npm ci
+npm run build
+cd ..
+./gradlew assembleDebug
+```
+
+GitHub Actions 每次构建都会自动做前两步。本地漏了这一步，`assembleDebug` / `assembleRelease`
+会在 `preBuild` 的 `checkWebAssets` 处直接失败并给出提示，不会编出没有 Web 效果的包。
+目录结构、共享协议和新增效果的步骤见 [`nowplaying-web/README.md`](nowplaying-web/README.md)。
+
 Release 签名材料（`keystore.properties` 与 `keystore/`）**不入库**，见 `.gitignore`；
 没有它们时打出来的包不签名，而不是构建失败。
 
 网关地址默认取 `gradle.properties` 里的 `sakura.gateway.url`，
 也可以在应用内「设置 → 网络」里改，或用 `-Psakura.gateway.url=...` 覆盖。
+
+## 自动构建（GitHub Actions）
+
+| Workflow | 触发 | 做什么 |
+| --- | --- | --- |
+| `ci.yml` | PR、手动 | `npm ci && npm run build` 生成 Web 产物 → 编译 Debug APK |
+| `release.yml` | **push 到 `main` / `master`**、手动 | 同样先生成 Web 产物 → 编译 Release APK → 上传 artifact 并创建 GitHub Release |
+
+每次 push 到主分支都会自动出一个 Release：标题 `Release YYYYMMDD`（UTC+8 日期），正文列出
+版本号、构建时间、Commit 与签名状态。同一天多次 push 用 `release-<日期>-<短 sha>` 作为唯一 tag，
+标题不变；如果只想按 tag 发版，把 `release.yml` 的 `on.push` 改回 `tags: ['v*']` 即可。
+
+APK 在对应 Actions 运行页的 **Artifacts** 里下载，也会挂在 Release 附件上。仓库里**只有源码**，
+`app/src/main/assets/nowplaying/` 已被忽略，两个 workflow 都会先现场生成再打包，并在打包前
+确认 `index.html` 存在，避免编出没有 Web 效果的包。
+
+**提交时**：把 `nowplaying-web/`（源码）和 `.github/workflows/` 加进 Git 即可，生成的 assets
+不需要 `git add`，也不存在「源码改了、产物忘了重新 build」的漂移。
+
+### Release 签名（可选）
+
+未配置 Secrets 时产出的是未签名包（`app-release-unsigned.apk`），只能自测。要出可直接覆盖安装的
+签名包，在仓库 `Settings → Secrets and variables → Actions` 里添加：
+
+| Secret | 值 |
+| --- | --- |
+| `KEYSTORE_BASE64` | `base64 -w0 keystore/sakura-music-release.jks` 的输出（Git Bash 里执行） |
+| `KEYSTORE_PASSWORD` | 本地 `keystore.properties` 的 `storePassword` |
+| `KEY_ALIAS` | `keyAlias` |
+| `KEY_PASSWORD` | `keyPassword` |
+
+`app/build.gradle.kts` 只从 `keystore.properties` 读签名，不认 `-P` 或环境变量，所以 CI 用 Secrets
+在 runner 上临时还原 jks 和 properties；两者都在 `.gitignore` 里，不会回写仓库。
+
+手动触发 `release.yml` 时可填 `gateway_url`，用 `-Psakura.gateway.url=...` 覆盖默认网关地址
+（`gradle.properties` 默认是模拟器用的 `10.0.2.2`，真机包请填真实地址）。

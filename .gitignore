@@ -15,6 +15,11 @@ captures/
 .env
 .env.*
 
+# 播放页 Web 效果：仓库只放源码，构建依赖与生成产物都不入库。
+# assets 由 npm run build / GitHub Actions 每次现场生成。
+nowplaying-web/node_modules/
+app/src/main/assets/nowplaying/
+
 # Release signing material — must never be committed.
 # 谁拿到这两个文件，谁就能签出「Android 认可的本应用更新」。
 keystore/

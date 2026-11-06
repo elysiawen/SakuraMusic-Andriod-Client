@@ -1,0 +1,138 @@
+name: Release APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      gateway_url:
+        description: '网关地址（可选；默认是 gradle.properties 里的模拟器地址）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 编译并发布 Release
+    runs-on: ubuntu-latest
+    env:
+      KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+      STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+      KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+      KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本号用 UTC+8 的日期，和「Release 20261101」这类命名一致。
+      - name: 生成版本号与构建时间
+        id: meta
+        run: |
+          BUILT=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S')
+          echo "version=$(date -u -d '+8 hours' +%Y%m%d)" >> "$GITHUB_OUTPUT"
+          echo "built_at=$BUILT (UTC+8)" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      # 仓库只放源码：assets 不入库，每次构建现场生成。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: nowplaying-web/package-lock.json
+
+      - name: 生成 Web 效果 assets
+        working-directory: nowplaying-web
+        run: |
+          npm ci
+          npm run build
+
+      - name: 确认产物已生成
+        run: |
+          if ! ls app/src/main/assets/nowplaying/*/index.html >/dev/null 2>&1; then
+            echo "::error::Web 构建没有产出 index.html；Gradle 的 checkWebAssets 也会拦下这次构建。"
+            exit 1
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+
+      - name: 安装 compileSdk 36 平台
+        run: |
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager "platforms;android-36" > /dev/null
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      # app/build.gradle.kts 只从 keystore.properties 读签名，不认 -P / 环境变量，
+      # 所以用 Secrets 在 runner 上临时还原；两个文件都在 .gitignore 里，不会回写仓库。
+      - name: 还原签名材料
+        if: env.KEYSTORE_B64 != ''
+        run: |
+          mkdir -p keystore
+          printf '%s' "$KEYSTORE_B64" | base64 --decode > keystore/sakura-music-release.jks
+          {
+            echo "storeFile=keystore/sakura-music-release.jks"
+            echo "storePassword=$STORE_PASSWORD"
+            echo "keyAlias=$KEY_ALIAS"
+            echo "keyPassword=$KEY_PASSWORD"
+          } > keystore.properties
+
+      - name: 记录签名状态
+        id: signing
+        run: |
+          if [ -n "$KEYSTORE_B64" ]; then
+            echo "value=已签名" >> "$GITHUB_OUTPUT"
+          else
+            echo "value=未签名（未配置签名 Secrets）" >> "$GITHUB_OUTPUT"
+          fi
+
+      # gradle.properties 里已有默认网关地址，环境变量覆盖不生效，只能用 -P。
+      - name: assembleRelease
+        env:
+          GATEWAY_URL: ${{ inputs.gateway_url }}
+        run: |
+          chmod +x gradlew
+          EXTRA=""
+          if [ -n "$GATEWAY_URL" ]; then
+            EXTRA="-Psakura.gateway.url=$GATEWAY_URL"
+          fi
+          ./gradlew assembleRelease $EXTRA --no-daemon --stacktrace
+
+      # 没有签名材料时 AGP 产出的是 app-release-unsigned.apk。
+      - name: 定位 APK
+        id: apk
+        run: |
+          if [ -f app/build/outputs/apk/release/app-release.apk ]; then
+            echo "path=app/build/outputs/apk/release/app-release.apk" >> "$GITHUB_OUTPUT"
+          else
+            echo "path=app/build/outputs/apk/release/app-release-unsigned.apk" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sakura-music-release
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+
+      # 不再靠 tag 触发，所以要显式给 tag_name；同一天多次 push 用短 sha 区分，标题仍是日期。
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release-${{ steps.meta.outputs.version }}-${{ steps.meta.outputs.short_sha }}
+          name: Release ${{ steps.meta.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          files: ${{ steps.apk.outputs.path }}
+          body: |
+            Sakura Music Android 自动构建
+
+            - 版本号: ${{ steps.meta.outputs.version }}
+            - 构建时间: ${{ steps.meta.outputs.built_at }}
+            - Commit: [`${{ steps.meta.outputs.short_sha }}`](${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }})
+            - 签名状态: ${{ steps.signing.outputs.value }}
+
+            未签名包只能用于自测；配置 `KEYSTORE_BASE64` 等 Secrets 后会产出可直接覆盖安装的签名包。

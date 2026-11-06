@@ -53,6 +53,7 @@ import com.sakura.music.data.cache.CacheUsage
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.prefs.DetailHeaderStyle
+import com.sakura.music.data.prefs.NowPlayingStyle
 import com.sakura.music.data.prefs.PlatformCapability
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.prefs.RoutePreference
@@ -79,6 +80,7 @@ import kotlinx.coroutines.launch
 
 private enum class SheetKind {
     Quality, PlayMode, Platform, LyricTtl, MetaTtl, RouteNetease, RouteQq, HeaderStyle,
+    NowPlayingStyle,
 }
 
 /**
@@ -100,6 +102,8 @@ fun SettingsScreen(navigator: SakuraNavigator) {
         .collectAsStateWithLifecycle(initialValue = ThemeMode.System)
     val headerStyle by container.settings.detailHeaderStyle
         .collectAsStateWithLifecycle(initialValue = DetailHeaderStyle.Default)
+    val nowPlayingStyle by container.settings.nowPlayingStyle
+        .collectAsStateWithLifecycle(initialValue = NowPlayingStyle.Default)
     val quality by container.settings.quality.collectAsStateWithLifecycle(initialValue = Quality.Default)
     val playMode by container.settings.playMode.collectAsStateWithLifecycle(initialValue = PlayMode.All)
     val mixWithOthers by container.settings.mixWithOthers.collectAsStateWithLifecycle(initialValue = false)
@@ -173,6 +177,13 @@ fun SettingsScreen(navigator: SakuraNavigator) {
                     subtitle = headerStyle.hint,
                     onClick = { openSheet = SheetKind.HeaderStyle },
                     trailing = { ValueText(headerStyle.label) },
+                )
+                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                SettingRow(
+                    title = "播放页样式",
+                    subtitle = nowPlayingStyle.hint,
+                    onClick = { openSheet = SheetKind.NowPlayingStyle },
+                    trailing = { ValueText(nowPlayingStyle.label) },
                 )
             }
 
@@ -498,6 +509,16 @@ fun SettingsScreen(navigator: SakuraNavigator) {
             optionLabel = { it.label },
             optionSubtitle = { it.hint },
             onSelect = { scope.launch { container.settings.setDetailHeaderStyle(it) } },
+            onDismiss = { openSheet = null },
+        )
+
+        SheetKind.NowPlayingStyle -> ChoiceSheet(
+            title = "播放页样式",
+            options = NowPlayingStyle.entries,
+            selected = nowPlayingStyle,
+            optionLabel = { it.label },
+            optionSubtitle = { it.hint },
+            onSelect = { scope.launch { container.settings.setNowPlayingStyle(it) } },
             onDismiss = { openSheet = null },
         )
 

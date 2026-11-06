@@ -93,6 +93,47 @@ android {
     }
 }
 
+/**
+ * 播放页 Web 效果只把源码放进仓库，assets 由 `nowplaying-web/npm run build` 现场生成。
+ * 缺失时直接让构建失败，避免编出一个「能装、但雾窗白屏」的包（静默降级）。
+ */
+val webAssetsDir = projectDir.resolve("src/main/assets/nowplaying")
+val checkWebAssets = tasks.register("checkWebAssets") {
+    group = "verification"
+    description = "检查播放页 Web 效果产物是否已生成"
+    // 不声明 inputs：产物是外部生成的，每次构建都实检一次，不能靠 Gradle 缓存跳过。
+    doLast {
+        val effectDirs = webAssetsDir.listFiles()?.filter { it.isDirectory } ?: emptyList()
+        val incomplete = effectDirs.filter { dir ->
+            !dir.resolve("index.html").isFile || !dir.resolve("${dir.name}.js").isFile
+        }
+        if (effectDirs.isEmpty() || incomplete.isNotEmpty()) {
+            val detail = if (incomplete.isEmpty()) {
+                "目录不存在或为空：$webAssetsDir"
+            } else {
+                "以下效果缺少 index.html 或 <id>.js：" + incomplete.joinToString { it.name }
+            }
+            throw GradleException(
+                """
+                |播放页 Web 效果产物缺失，$detail
+                |
+                |仓库只放源码，assets 不入库。请先生成一次：
+                |    cd nowplaying-web
+                |    npm ci
+                |    npm run build
+                |
+                |GitHub Actions 会在每次构建前自动执行这一步。
+                """.trimMargin(),
+            )
+        }
+    }
+}
+
+// preBuild 是所有变体共用的入口，Debug / Release 都会先过这道检查。
+tasks.matching { it.name == "preBuild" }.configureEach {
+    dependsOn(checkWebAssets)
+}
+
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
@@ -126,6 +167,7 @@ dependencies {
 
     implementation(libs.androidx.datastore.preferences)
     implementation(libs.coil.compose)
+    implementation(libs.androidx.webkit)
 
     testImplementation(libs.junit)
 }
