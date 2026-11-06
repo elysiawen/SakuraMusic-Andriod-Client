@@ -133,8 +133,10 @@ import com.sakura.music.data.model.ArtistRef
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.data.model.UnifiedTrack
+import com.sakura.music.data.model.formatQualitySize
 import com.sakura.music.data.model.qualityLabel
 import com.sakura.music.data.model.qualityMenuLabel
+import com.sakura.music.data.model.qualitySpec
 import com.sakura.music.data.prefs.PlayMode
 import com.sakura.music.data.remote.friendlyMessage
 import com.sakura.music.data.room.RoomMemberView
@@ -204,6 +206,12 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
     var showAddToPlaylist by remember { mutableStateOf(false) }
     var showDevices by remember { mutableStateOf(false) }
     var showTogether by remember { mutableStateOf(false) }
+
+    // 打开音质面板时按需补一次单曲详情：旧存档 / 播放历史里的曲目常常没带 qualitySizes，
+    // 面板第一次打开就该把各档体积补齐（已有体积时是空操作）。
+    LaunchedEffect(showQuality) {
+        if (showQuality) container.playbackCenter.refreshQualityMeta()
+    }
 
     // 拖动进度时歌词跟着走（但不打扰播放器）；松手后回到真实进度。
     var scrubPosition by remember { mutableStateOf<Long?>(null) }
@@ -807,12 +815,17 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
             // 面板里的完整档位名按当前曲目所属平台取（QQ 客户端叫「HQ 高品质」这类）。
             optionLabel = { qualityMenuLabel(it, state.activePlatform) },
             optionSubtitle = { option ->
+                // 体积来自曲目自身的 qualitySizes（键就是档位 id），缺省时只写规格，
+                // 不把「不知道」当成 0 字节 —— 口径与网页端音质面板的「体积 · 规格」一致。
+                val size = state.qualitySizes?.get(option.id)?.let(::formatQualitySize)
+                val specLine = listOfNotNull(size, qualitySpec(option)).joinToString(" · ")
                 // 偏好与实际可能不是一回事：网易云拿不到某一档时不报错，而是"按能给的给"，
                 // 所以「正在播放」只能看 resolve 回来的实际档位，不能照偏好写。
-                listOfNotNull(
+                val statusLine = listOfNotNull(
                     "当前设置".takeIf { option == quality },
                     "正在播放".takeIf { option == state.actualQuality },
                 ).joinToString(" · ").ifEmpty { null }
+                listOfNotNull(specLine, statusLine).joinToString("\n").ifEmpty { null }
             },
             // 改的是偏好：PlaybackCenter 监听到之后会按新档位重建队列并接回进度。
             onSelect = { scope.launch { container.settings.setQuality(it) } },

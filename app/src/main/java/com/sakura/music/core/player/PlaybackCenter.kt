@@ -95,6 +95,14 @@ data class PlaybackState(
      * 所以照样只列这些，宁可暂时少列，也不显示本曲其实没有的档位。
      */
     val qualityOptions: List<Quality>? = null,
+    /**
+     * 当前这一首各档的文件大小（字节），键是档位 id。
+     *
+     * 刻意不直接读 [current]：收藏、播放历史、本地存档里的曲目常常没带这份元数据
+     * （网关按文本存回去时丢掉了），播放时补一次单曲详情，把结果放在这里给音质面板用。
+     * 换歌必须清空，别把上一首的体积留给下一首。
+     */
+    val qualitySizes: Map<String, Long>? = null,
     /** 当前这一首实际用的音源平台（偏好音源命中时可能不是 `sources[0]`）。 */
     val activePlatform: Platform? = null,
     val lyric: List<LyricLine> = emptyList(),
@@ -617,6 +625,7 @@ class PlaybackCenter(
                 // 会短暂把「本曲其实没有的档位」也列出来。清单不完整时这里拿到的是已知的那几档
                 // （都是真的存在），完整的清单随后由 syncQualityOptions 补上。
                 qualityOptions = track.availableQualities,
+                qualitySizes = track.qualitySizes,
                 lyric = emptyList(),
                 lyricLoading = false,
                 lyricWordByWord = false,
@@ -628,7 +637,7 @@ class PlaybackCenter(
             loadLyrics(track)
             primeResolve(track)
         }
-        // 补档位清单要额外打一次单曲详情，和上面两件事互不依赖，单独一个协程——
+        // 补档位清单 / 各档体积要额外打一次单曲详情，和上面两件事互不依赖，单独一个协程——
         // 排在 primeResolve 后面的话，它会白白多等一次网络往返。
         mainScope.launch { syncQualityOptions(track) }
         // 顺手把封面存到本地：等真要离线听了再去取就来不及了。
@@ -1440,25 +1449,45 @@ class PlaybackCenter(
     }
 
     /**
-     * 补全当前曲目的档位清单。
+     * 补全当前曲目的档位清单**与各档体积**。
      *
-     * 搜索与歌单里的网易云曲目只带基础档（`qualitiesComplete` 为 false），照着筛选项会把用户
-     * 其实拥有的高阶档藏起来，所以补一次单曲详情——它的 `qualities` 是完整的。
-     * 详情走元数据缓存，同一首歌重播不会再打上游。
-     *
-     * 清单本来就完整时 [onTrackChanged] 当场就填好了，这里不必多此一举。
+     * 搜索与歌单里的网易云曲目只带基础档（`qualitiesComplete` 为 false）；收藏、播放历史、
+     * 本地存档里的曲目更可能连 `qualitySizes` 都没有（网关按文本存回去时丢掉了体积）。
+     * 两种缺口都要补一次单曲详情——详情带完整清单和体积。详情走元数据缓存，
+     * 同一首歌重播不会再打上游。
      */
+    /**
+     * 音质面板打开时按需再补一次：冷启动恢复出来的旧存档、播放历史里的曲目常常没带
+     * `qualitySizes`。补全结果留在状态里，已经有体积时是空操作。
+     */
+    fun refreshQualityMeta() {
+        val snapshot = _state.value
+        val track = snapshot.current ?: return
+        if (!snapshot.qualitySizes.isNullOrEmpty() && track.qualitiesAuthoritative) return
+        mainScope.launch { syncQualityOptions(track) }
+    }
+
     private suspend fun syncQualityOptions(track: UnifiedTrack) {
-        if (track.qualitiesAuthoritative) return
+        val needOptions = !track.qualitiesAuthoritative
+        val needSizes = _state.value.qualitySizes.isNullOrEmpty()
+        if (!needOptions && !needSizes) return
         val source = track.sourceOf(preferredPlatform ?: Platform.UNKNOWN) ?: track.primarySource ?: return
         val detail = runCatching { api.track(source.platform, source.id) }.getOrNull()?.track ?: return
-        // 详情也可能不完整（上游没给全）：那就别覆盖手上那份已知的清单——不能拿一份
-        // "同样不全、而且还是另一份"的清单换掉它。
-        if (!detail.qualitiesAuthoritative) return
-        val complete = detail.availableQualities ?: return
-        // 补详情期间可能已经换歌：别把上一首的档位盖到当前曲目上。
+        // 补详情期间可能已经换歌：别把上一首的档位 / 体积盖到当前曲目上。
         if (_state.value.current?.key != track.key) return
-        _state.update { it.copy(qualityOptions = complete) }
+        _state.update {
+            it.copy(
+                // 详情也可能不完整（上游没给全）：那就别覆盖手上那份已知的清单——不能拿一份
+                // "同样不全、而且还是另一份"的清单换掉它。
+                qualityOptions = if (needOptions && detail.qualitiesAuthoritative) {
+                    detail.availableQualities ?: it.qualityOptions
+                } else {
+                    it.qualityOptions
+                },
+                qualitySizes = detail.qualitySizes?.takeIf { sizes -> sizes.isNotEmpty() }
+                    ?: it.qualitySizes,
+            )
+        }
     }
 
     fun clearError() {

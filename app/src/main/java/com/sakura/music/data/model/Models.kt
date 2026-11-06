@@ -9,6 +9,7 @@ import kotlinx.serialization.descriptors.SerialDescriptor
 import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonElement
+import kotlin.math.roundToInt
 
 /* ------------------------------ 枚举 ------------------------------ */
 
@@ -116,6 +117,29 @@ fun qualityMenuLabel(quality: Quality, platform: Platform?): String =
 /** 芯片、提示语这类紧凑处用短名，免得被「SQ 无损品质」撑开。 */
 fun qualityLabel(quality: Quality, platform: Platform?): String =
     if (platform == Platform.QQ) qqQualityShort(quality) else quality.label
+
+/** 各档的规格说明，与网页端音质面板那一栏同口径。 */
+fun qualitySpec(quality: Quality): String = when (quality) {
+    Quality.STANDARD -> "128kbps"
+    Quality.HIGH -> "最高 320kbps"
+    Quality.LOSSLESS -> "无损 FLAC"
+    Quality.HIRES -> "Hi-Res"
+    Quality.SPATIAL -> "96kHz/24bit"
+    Quality.MASTER -> "母带级 192kHz/24bit"
+    Quality.SURROUND -> "最高 5.1 声道"
+}
+
+/**
+ * 音质面板里显示的文件大小。
+ *
+ * 网关给的是字节数；缺省 / 0 都表示「不知道」，不能显示成「0.0M」。
+ * 按网页端 `toFixed(1)M` 的口径换算成一位小数的 MB，手动取整以免 Locale 把小数点写成逗号。
+ */
+fun formatQualitySize(bytes: Long): String? {
+    if (bytes <= 0L) return null
+    val tenths = (bytes / 1_048_576f * 10f).roundToInt().coerceAtLeast(1)
+    return "${tenths / 10}.${tenths % 10}M"
+}
 
 /** 搜索页的类型页签。 */
 @Serializable
