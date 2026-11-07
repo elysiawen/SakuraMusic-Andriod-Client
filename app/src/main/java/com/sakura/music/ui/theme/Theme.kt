@@ -16,7 +16,7 @@ import androidx.core.view.WindowCompat
 
 /** 让任意 composable 读到当前选中的强调色。 */
 val LocalAccentTheme: ProvidableCompositionLocal<AccentTheme> =
-    staticCompositionLocalOf { AccentTheme.Sakura }
+    staticCompositionLocalOf { AccentTheme.Indigo }
 
 private fun buildLight(accent: AccentTheme) = lightColorScheme(
     primary = lightAccent(accent).primary,
@@ -88,7 +88,7 @@ private fun buildDark(accent: AccentTheme) = darkColorScheme(
  */
 @Composable
 fun SakuraTheme(
-    accent: AccentTheme = AccentTheme.Sakura,
+    accent: AccentTheme = AccentTheme.Indigo,
     darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit,
 ) {

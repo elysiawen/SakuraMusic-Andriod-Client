@@ -57,8 +57,9 @@ enum class AccentTheme(val label: String) {
     Graphite("石墨");
 
     companion object {
+        /** 没存过、或存了不认识的值时回落到靛青：App 的默认强调色。 */
         fun fromId(id: String?): AccentTheme =
-            entries.firstOrNull { it.name.equals(id, ignoreCase = true) } ?: Sakura
+            entries.firstOrNull { it.name.equals(id, ignoreCase = true) } ?: Indigo
     }
 }
 

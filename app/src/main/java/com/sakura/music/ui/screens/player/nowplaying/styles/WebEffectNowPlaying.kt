@@ -165,6 +165,7 @@ fun WebEffectNowPlaying(
     if (showSettings) {
         EffectSettingsSheet(
             effectId = effectId,
+            palette = palette,
             settingsJson = settingsJson,
             onChange = { json, commit ->
                 settingsJson = json

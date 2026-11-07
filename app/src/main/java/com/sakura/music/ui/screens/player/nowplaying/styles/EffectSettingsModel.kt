@@ -1,5 +1,6 @@
 package com.sakura.music.ui.screens.player.nowplaying.styles
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
@@ -81,9 +82,17 @@ internal sealed interface EffectSetting {
  * 这样即使某项从未被改过，依赖它的条件也能拿到桌面端 tuning 里的默认值。
  */
 internal class SettingValues private constructor(private val values: Map<String, Any?>) {
+    fun raw(key: String): Any? = values[key]
     fun text(key: String): String = values[key]?.let(::settingText).orEmpty()
     fun flag(key: String): Boolean = values[key] as? Boolean ?: false
     fun amount(key: String): Float = (values[key] as? Number)?.toFloat() ?: 0f
+
+    /** 多选字段的有效值：默认值是 List，被 patch 覆盖后是 JSONArray。 */
+    fun choices(key: String): Set<String> = when (val value = values[key]) {
+        is JSONArray -> (0 until value.length()).mapNotNull { value.optString(it, null) }.toSet()
+        is Iterable<*> -> value.mapNotNull { it?.toString() }.toSet()
+        else -> emptySet()
+    }
 
     companion object {
         fun of(specs: List<EffectSetting>, patch: JSONObject): SettingValues {

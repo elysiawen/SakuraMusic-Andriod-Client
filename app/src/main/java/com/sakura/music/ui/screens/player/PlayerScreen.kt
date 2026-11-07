@@ -107,8 +107,8 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
     val following by container.connectSync.following.collectAsStateWithLifecycle()
     val favorites by container.libraryRepository.favoriteKeys.collectAsStateWithLifecycle()
     val quality by container.settings.quality.collectAsStateWithLifecycle(initialValue = Quality.Default)
-    val style by container.settings.nowPlayingStyle
-        .collectAsStateWithLifecycle(initialValue = NowPlayingStyle.Default)
+    // nowPlayingStyle 是常驻 StateFlow，首帧直接拿缓存值，不会先画一帧原生页。
+    val style by container.settings.nowPlayingStyle.collectAsStateWithLifecycle()
 
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()

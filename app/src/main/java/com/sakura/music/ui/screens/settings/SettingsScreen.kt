@@ -97,13 +97,12 @@ fun SettingsScreen(navigator: SakuraNavigator) {
     val container = appContainer()
     val scope = rememberCoroutineScope()
 
-    val accent by container.settings.accent.collectAsStateWithLifecycle(initialValue = AccentTheme.Sakura)
+    val accent by container.settings.accent.collectAsStateWithLifecycle(initialValue = AccentTheme.Indigo)
     val themeMode by container.settings.themeMode
         .collectAsStateWithLifecycle(initialValue = ThemeMode.System)
     val headerStyle by container.settings.detailHeaderStyle
         .collectAsStateWithLifecycle(initialValue = DetailHeaderStyle.Default)
-    val nowPlayingStyle by container.settings.nowPlayingStyle
-        .collectAsStateWithLifecycle(initialValue = NowPlayingStyle.Default)
+    val nowPlayingStyle by container.settings.nowPlayingStyle.collectAsStateWithLifecycle()
     val quality by container.settings.quality.collectAsStateWithLifecycle(initialValue = Quality.Default)
     val playMode by container.settings.playMode.collectAsStateWithLifecycle(initialValue = PlayMode.All)
     val mixWithOthers by container.settings.mixWithOthers.collectAsStateWithLifecycle(initialValue = false)

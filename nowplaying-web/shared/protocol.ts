@@ -38,11 +38,11 @@ export interface PlaybackPayload {
   positionMs?: number;
 }
 
-/** 桥没推主题时的兜底色，与安卓侧桌面调色板的初值一致。 */
+/** 桥没推主题时的兜底色，与安卓默认靛青（深色）调色板的初值一致。 */
 export const THEME_FALLBACK: ThemePayload = {
-  accentColor: '#f472b6',
-  secondaryColor: '#c084fc',
-  primaryColor: '#f9a8d4',
+  accentColor: '#b3c0f0',
+  secondaryColor: '#c4c6dc',
+  primaryColor: '#b3c0f0',
   backgroundColor: '#05070a',
 };
 

@@ -196,7 +196,7 @@ class AppContainer(private val appContext: Context) {
 
     // ---- 数据 ----------------------------------------------------------------
 
-    val settings: SettingsStore by lazy { SettingsStore(appContext) }
+    val settings: SettingsStore by lazy { SettingsStore(appContext, scope) }
 
     /**
      * 本地缓存的总管：音频、封面、歌词、歌曲与专辑信息。

@@ -1,45 +1,79 @@
+**English** | [简体中文](README.zh-CN.md)
+
 # SakuraMusic-Andriod-Client
 
 [![Android CI](https://github.com/elysiawen/SakuraMusic-Andriod-Client/actions/workflows/ci.yml/badge.svg)](https://github.com/elysiawen/SakuraMusic-Andriod-Client/actions/workflows/ci.yml)
 
-Sakura Music 的 Android 客户端。Kotlin + Jetpack Compose + Media3（ExoPlayer），
-播放器活在前台服务里，界面只是它的遥控器。
+The Android client for Sakura Music. Kotlin + Jetpack Compose + Media3 (ExoPlayer);
+playback lives in a foreground service and the UI is just its remote control.
 
-- 播放：Media3 / ExoPlayer，支持 CDN 直连与网关中转，缓存后离线可播
-- 歌词：优先用网易云 YRC / QQ 音乐 QRC 的逐字时间轴按字点亮，解析不出来时自动退回按行 LRC（含翻译 / 罗马音）
-- 私人电台：首页「私人漫游」（网易云）/「沉浸刷歌」（QQ 音乐）整批入队，最后一首开始播时经
-  `GET /api/radio/:platform` 自动补下一批（会话去重、空批次冷却重试、刷新后接着续）；
-  跟着平台开关走，与「一起听」互斥
-- 音质：7 档统一模型，档位名按当前曲目平台显示（QQ 客户端口径：标准品质 / HQ / SQ / 臻品音质 /
-  臻品母带 4.0 / 臻品全景声），「当前音质」显示网关实际返回、可能降级后的档位
-- 多设备：同一账号下的设备互相可见、可互相遥控，也能把正在播的队列连进度一起交接过去；
-  **一起听期间**设备面板只剩「看状态 / 调音量 / 让声音切到这台」，内容控制归房间
-- 一起听：和朋友共享同一个播放现场（6 位房间码 / 邀请链接），任一方都能切歌、暂停、拖进度、
-  切换播放模式（顺序 / 列表循环 / 单曲循环 / 随机，**两端同步**，播完往哪走由服务端按房间模式接），
-  两端镜像同一首歌的同一进度；同账号的第二台设备自动成为「旁观」，可一键「把播放转移到本机」，
-  也能在设备面板里「让声音切到这台」把声音推过去（目标必须已在房间里的旁观设备）；
-  会员共享按平台（网易云 / QQ）借用对方账号的会员取流，借用要**对方本人确认**，
-  服务端只存授权关系、不存凭据
-- 平台开关：每个平台有总开关（关掉即该平台任何功能都不参与），开启后可再按能力（搜索 / 首页推荐）逐项启用；
-  配置存在 Sakura 账号下，与网页端共用同一份，换设备自动同步。播放不受影响
-- 音乐库：自建歌单、收藏（「我喜欢的音乐」）、播放历史、本地下载
-- 本地缓存：音频、封面、歌词与歌曲信息，容量与有效期都可在设置里调
-- 音源：网易云音乐 / QQ 音乐（经自建网关）
+- Playback: Media3 / ExoPlayer, direct CDN streaming or gateway relay, cached tracks play offline
+- Lyrics: syllable-level highlighting from NetEase Cloud Music YRC / QQ Music QRC timelines,
+  with automatic fallback to line-based LRC (including translations / romaji)
+- Personal radio: "Private Roaming" (NetEase) / "Immersion Mix" (QQ Music) enqueue a whole batch
+  from the home page; the next batch is fetched via `GET /api/radio/:platform` when the last track
+  starts (session dedup, cooldown retries on empty batches, resumes after a refresh).
+  Follows the per-platform toggle and is mutually exclusive with Listen Together
+- Audio quality: a unified 7-tier model; tier names follow the current track's platform
+  (QQ client terms: Standard / HQ / SQ / Premium / Master 4.0 / Spatial Audio).
+  "Current quality" shows what the gateway actually returned, which may be a downgraded tier
+- Multiple devices: devices on the same account see and control each other, and can hand over
+  the queue together with the playback position. **During Listen Together** the device panel only
+  offers "view status / set volume / move audio here"; content control belongs to the room
+- Listen Together: share one playback session with a friend (6-digit room code / invite link).
+  Either side can change tracks, pause, seek, or switch play mode (sequential / list loop /
+  single loop / shuffle, **synced on both ends**; the server decides what plays next from the room mode).
+  Both ends mirror the same track at the same position; a second device on the same account
+  automatically becomes a spectator and can take over playback in one tap, or push audio to itself
+  from the device panel (the target must already be a spectator in the room).
+  VIP sharing is per platform (NetEase / QQ) and borrows the other account's membership for streaming;
+  borrowing requires **explicit confirmation from that person**, and the server stores only the
+  grant relationship, never credentials
+- Platform toggles: each platform has a master switch (off disables every feature of that platform)
+  plus per-capability switches (search / home recommendations) when enabled.
+  Config is stored under the Sakura account and shared with the web client, so it syncs across devices.
+  Playback is unaffected
+- Library: custom playlists, favourites ("My Favourites"), play history, local downloads
+- Local cache: audio, cover art, lyrics and track metadata, with adjustable size and retention
+- Sources: NetEase Cloud Music / QQ Music (via a self-hosted gateway)
+- Now-playing styles: three Compose pages (Native / Classic / Immersive) plus three WebView
+  visualizers — 雾窗 (Nebbia), 绘光 (Lumiere) and 町景 (Machi). The three WebView effects share
+  one JS bridge, one WebView host and one glass pill control bar, each with its own settings panel
+  (gear in the top bar). Preferences are stored per effect, options show or hide based on the
+  current scene, and the accent follows the app theme (indigo by default). When the full-screen
+  page is collapsed the whole subtree leaves the composition and the WebView is destroyed;
+  backgrounding the app while it is open pauses rendering
 
-多设备那套协议的细节（设备身份、SSE 事件、`transfer` / `release` 时序）见
-[`docs/connect-protocol.md`](docs/connect-protocol.md)；
-「一起听」（房间）的协议与席位 / 旁观 / 「转移到本机」语义见工作区里的
+The multi-device protocol (device identity, SSE events, `transfer` / `release` ordering) is documented
+in [`docs/connect-protocol.md`](docs/connect-protocol.md); the Listen Together protocol and the
+seat / spectator / "transfer to this device" semantics live in
 [`sakura-music/docs/together-protocol.md`](../sakura-music/docs/together-protocol.md)
-（客户端实现见 `app/src/main/java/com/sakura/music/core/player/RoomSync.kt`）。
+(client implementation: `app/src/main/java/com/sakura/music/core/player/RoomSync.kt`).
 
-## 构建
+## Credits and Licenses
+
+The **雾窗 (Nebbia), 绘光 (Lumiere) and 町景 (Machi)** now-playing visualizers are ported from
+**[Folia](https://github.com/chthollyphile/folia-major)** (`folia-major`), a desktop music visualizer.
+Many thanks to its author for the WebGL2 / PixiJS / three.js engines, the scene design, and the many
+thoughtful details throughout. The pure-TS rendering engines are mirrored under
+`nowplaying-web/engine/` with their original layout; only the shell was replaced with an Android
+WebView host bridge, Compose controls and a settings panel.
+
+Nebbia's stroke-order writing uses outline data from [AnimCJK](https://github.com/animCJK), whose
+glyphs derive from the Arphic PL KaitiM font and are distributed under the **Arphic Public License**.
+The relevant license texts are declared by `nowplaying-web/effects/*/effect.json`, shipped with the APK
+(see `nowplaying-web/engine/nebbia/licenses/`); check the license terms before removing them.
+
+## Building
 
 ```bash
 ./gradlew assembleRelease
 ```
 
-播放页的 Web 效果源码在 `nowplaying-web/`，产物写到 `app/src/main/assets/nowplaying/<效果 id>/`，
-**不入库**（见 `.gitignore`）。Gradle 不跑 Node，所以 clone 后要先生成一次 assets 再编译：
+The WebView effect sources live in `nowplaying-web/`: rendering engines are mirrored in `engine/`,
+and each effect's WebView host shell lives in `effects/<effect id>/`. Bundles are written to
+`app/src/main/assets/nowplaying/<effect id>/` and are **not committed** (see `.gitignore`).
+Gradle does not run Node, so generate the assets once after cloning:
 
 ```bash
 cd nowplaying-web
@@ -49,50 +83,34 @@ cd ..
 ./gradlew assembleDebug
 ```
 
-GitHub Actions 每次构建都会自动做前两步。本地漏了这一步，`assembleDebug` / `assembleRelease`
-会在 `preBuild` 的 `checkWebAssets` 处直接失败并给出提示，不会编出没有 Web 效果的包。
-目录结构、共享协议和新增效果的步骤见 [`nowplaying-web/README.md`](nowplaying-web/README.md)。
+GitHub Actions runs the first two steps on every build. If you skip them locally, `assembleDebug` /
+`assembleRelease` fails early at the `checkWebAssets` task with a hint, so an APK without Web effects
+is never produced. See [`nowplaying-web/README.md`](nowplaying-web/README.md) for the directory
+layout, shared protocol and how to add an effect.
 
-Release 签名材料（`keystore.properties` 与 `keystore/`）**不入库**，见 `.gitignore`；
-本地没有它们时打出来的包不签名，而不是构建失败（CI 上已配置 Secrets，产出的是签名包）。
+Release signing material (`keystore.properties` and `keystore/`) is **not committed** (see `.gitignore`);
+without them a local build is unsigned rather than failing (CI has Secrets configured and produces
+signed builds).
 
-网关地址默认取 `gradle.properties` 里的 `sakura.gateway.url`，
-也可以在应用内「设置 → 网络」里改，或用 `-Psakura.gateway.url=...` 覆盖。
+The gateway URL defaults to `sakura.gateway.url` in `gradle.properties`, and can be changed under
+"Settings → Network" in the app or overridden with `-Psakura.gateway.url=...`.
 
-## 自动构建（GitHub Actions）
+## Automated Builds (GitHub Actions)
 
-| Workflow | 触发 | 做什么 |
+| Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | PR、手动 | `npm ci && npm run build` 生成 Web 产物 → 编译 Debug APK |
-| `release.yml` | **push 到 `main` / `master`**、手动 | 同样先生成 Web 产物 → 编译 Release APK → 上传 artifact 并创建 GitHub Release |
+| `ci.yml` | PRs, manual | `npm ci && npm run build` to generate Web assets → build Debug APK |
+| `release.yml` | **push to `main` / `master`**, manual | Same Web asset step → build Release APK → upload artifact and create a GitHub Release |
 
-每次 push 到主分支都会自动出一个 Release：标题 `Release YYYYMMDD`（UTC+8 日期），正文列出
-版本号、构建时间、Commit。同一天多次 push 用 `release-<日期>-<短 sha>` 作为唯一 tag，
-标题不变；如果只想按 tag 发版，把 `release.yml` 的 `on.push` 改回 `tags: ['v*']` 即可。
+Every push to the main branch produces a Release titled `Release YYYYMMDD` (UTC+8 date), with the
+version, build time and commit in the body. Multiple pushes on the same day use
+`release-<date>-<short sha>` as a unique tag while the title stays the same; to release only on tags,
+change `release.yml`'s `on.push` back to `tags: ['v*']`.
 
-APK 在对应 Actions 运行页的 **Artifacts** 里下载，也会挂在 Release 附件上。仓库里**只有源码**，
-`app/src/main/assets/nowplaying/` 已被忽略，两个 workflow 都会先现场生成再打包，并在打包前
-确认 `index.html` 存在，避免编出没有 Web 效果的包。
+Download the APK from **Artifacts** on the corresponding Actions run, or from the Release assets.
+The repository contains **source only**: `app/src/main/assets/nowplaying/` is ignored, and both
+workflows generate assets on the runner and verify `index.html` exists before packaging, so an APK
+without Web effects is never produced.
 
-**提交时**：把 `nowplaying-web/`（源码）和 `.github/workflows/` 加进 Git 即可，生成的 assets
-不需要 `git add`，也不存在「源码改了、产物忘了重新 build」的漂移。
-
-### Release 签名
-
-本仓库已配置签名 Secrets，每次 push 到主分支产出的都是可直接覆盖安装的签名包，Release 正文不再
-标注签名状态。本地没有 `keystore/` 与 `keystore.properties` 时打出来的包不签名，仅能自测。
-
-要让自己 fork 出的仓库也出签名包，在 `Settings → Secrets and variables → Actions` 里添加：
-
-| Secret | 值 |
-| --- | --- |
-| `KEYSTORE_BASE64` | `base64 -w0 keystore/sakura-music-release.jks` 的输出（Git Bash 里执行） |
-| `KEYSTORE_PASSWORD` | 本地 `keystore.properties` 的 `storePassword` |
-| `KEY_ALIAS` | `keyAlias` |
-| `KEY_PASSWORD` | `keyPassword` |
-
-`app/build.gradle.kts` 只从 `keystore.properties` 读签名，不认 `-P` 或环境变量，所以 CI 用 Secrets
-在 runner 上临时还原 jks 和 properties；两者都在 `.gitignore` 里，不会回写仓库。
-
-手动触发 `release.yml` 时可填 `gateway_url`，用 `-Psakura.gateway.url=...` 覆盖默认网关地址
-（`gradle.properties` 默认是模拟器用的 `10.0.2.2`，真机包请填真实地址）。
+**When committing**: just add `nowplaying-web/` (sources) and `.github/workflows/` to Git. Generated
+assets never need `git add`, and there is no drift between changed sources and stale bundles.

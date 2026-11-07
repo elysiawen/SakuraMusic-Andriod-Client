@@ -13,16 +13,18 @@ import com.sakura.music.BuildConfig
 import com.sakura.music.data.model.Platform
 import com.sakura.music.data.model.Quality
 import com.sakura.music.ui.theme.AccentTheme
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 private val Context.settingsDataStore: DataStore<Preferences> by preferencesDataStore(name = "sakura_music_settings")
 
 /** 应用级偏好：外观、音质、播放模式、音源偏好，以及「直连不通」的平台记录。 */
-class SettingsStore(private val context: Context) {
+class SettingsStore(private val context: Context, private val scope: CoroutineScope) {
 
     private object Keys {
         /** 音频缓存上限（MB）。 */
@@ -115,8 +117,21 @@ class SettingsStore(private val context: Context) {
     val detailHeaderStyle: Flow<DetailHeaderStyle> = context.settingsDataStore.data
         .map { DetailHeaderStyle.fromId(it[Keys.DetailHeader]) }
 
-    val nowPlayingStyle: Flow<NowPlayingStyle> = context.settingsDataStore.data
-        .map { NowPlayingStyle.fromId(it[Keys.NowPlaying]) }
+    /**
+     * 全屏页样式的常驻缓存：播放页每次展开都会重新进组合，普通 Flow 的 initialValue
+     * 会先画一帧默认样式再淡切过去，看起来就是「闪一下原生页」。这里在 App 级 scope
+     * 里一直收着 DataStore，切样式时也立刻改值，UI 首帧就能拿到真实样式。
+     */
+    private val _nowPlayingStyle = MutableStateFlow(NowPlayingStyle.Default)
+    val nowPlayingStyle: StateFlow<NowPlayingStyle> = _nowPlayingStyle.asStateFlow()
+
+    init {
+        scope.launch {
+            context.settingsDataStore.data
+                .map { NowPlayingStyle.fromId(it[Keys.NowPlaying]) }
+                .collect { _nowPlayingStyle.value = it }
+        }
+    }
 
     /** 效果设置面板存的「改过的字段」；空 JSON 表示全用该效果的默认 tuning。 */
     fun effectSettings(effectId: String): Flow<String> = context.settingsDataStore.data
@@ -211,8 +226,9 @@ class SettingsStore(private val context: Context) {
         it[Keys.DetailHeader] = value.id
     }
 
-    suspend fun setNowPlayingStyle(value: NowPlayingStyle) = edit {
-        it[Keys.NowPlaying] = value.id
+    suspend fun setNowPlayingStyle(value: NowPlayingStyle) {
+        _nowPlayingStyle.value = value
+        edit { it[Keys.NowPlaying] = value.id }
     }
 
     /** 整块覆盖该效果的设置 patch；面板里滑块松手、开关切换时才落盘。 */

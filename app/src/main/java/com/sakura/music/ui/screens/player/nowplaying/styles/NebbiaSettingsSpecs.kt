@@ -2,12 +2,21 @@ package com.sakura.music.ui.screens.player.nowplaying.styles
 
 /**
  * 雾窗设置项，对齐桌面端 `NebbiaSettings.vue` 的分组与显隐：
- * 窗外选了梦海流萤才有水母，玻璃换挡只留对应那组滑块，雪窗的雨夜不下雨，
- * 水族箱里没有车身颠簸；出现 / 消失 / 构图三组至少留一种。
+ * 窗外选了梦海流萤才有水母，玻璃换挡只留对应那组滑块，水族箱里没有车身颠簸；
+ * 出现 / 消失 / 构图三组至少留一种。
  */
 
 private val aquarium: SettingVisible = { it.text("behind") == "aquarium" }
 private fun glassIs(value: String): SettingVisible = { it.text("glass") == value }
+
+/**
+ * 街景的雨只画在聚光灯的光柱里：雪窗没有雨，关掉聚光灯景物或把强度调到 0
+ * 也看不出变化，这几种情况「窗外的雨」就隐藏。水族箱的细气泡不看聚光灯。
+ */
+private val rainVisible: SettingVisible = {
+    it.text("behind") == "aquarium" ||
+        (it.text("glass") != "snow" && "spot" in it.choices("scenery") && it.amount("spot") > 0f)
+}
 
 internal fun nebbiaSpecs(): List<EffectSetting> = listOf(
     pick("窗外", "behind", "窗外场景", "night", "night" to "雨夜街景", "aquarium" to "梦海流萤"),
@@ -23,7 +32,7 @@ internal fun nebbiaSpecs(): List<EffectSetting> = listOf(
     pick(
         "窗外", "rain", "窗外的雨", "slant",
         "slant" to "斜落", "straight" to "直落", "off" to "不下",
-        visibleWhen = { it.text("behind") == "aquarium" || it.text("glass") != "snow" },
+        visibleWhen = rainVisible,
     ),
 
     pick("玻璃", "glass", "玻璃上的水", "rain", "rain" to "雨窗", "dew" to "凝露", "snow" to "雪窗"),
