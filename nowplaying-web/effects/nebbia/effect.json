@@ -3,10 +3,10 @@
   "title": "Nebbia",
   "entry": "main.ts",
   "assets": [
-    "nebbia/nebbia-strokes.json",
-    "nebbia/nebbiaRaindrop.LICENSE.txt"
+    "../../engine/nebbia/nebbia-strokes.json",
+    "../../engine/nebbia/nebbiaRaindrop.LICENSE.txt"
   ],
   "assetDirs": [
-    "nebbia/licenses"
+    "../../engine/nebbia/licenses"
   ]
 }

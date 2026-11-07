@@ -19,11 +19,14 @@ import androidx.compose.material.icons.rounded.Album
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Cast
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.Flare
 import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.LocationCity
 import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.MusicNote
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Tune
 import androidx.compose.material.icons.rounded.WaterDrop
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -56,6 +59,8 @@ val NowPlayingStyle.icon: ImageVector
         NowPlayingStyle.Classic -> Icons.Rounded.Album
         NowPlayingStyle.Immersive -> Icons.Rounded.AutoAwesome
         NowPlayingStyle.Nebbia -> Icons.Rounded.WaterDrop
+        NowPlayingStyle.Lumiere -> Icons.Rounded.Flare
+        NowPlayingStyle.Machi -> Icons.Rounded.LocationCity
     }
 
 /**
@@ -75,6 +80,8 @@ fun NowPlayingTopBar(
     state: NowPlayingUiState,
     actions: NowPlayingActions,
     skin: NowPlayingSkin,
+    /** 只有带设置面板的网页端效果会传，其它样式不多一个用不上的按钮。 */
+    onOpenEffectSettings: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val desktop = skin == NowPlayingSkin.Desktop
@@ -118,6 +125,17 @@ fun NowPlayingTopBar(
                 onClick = actions.stopRadio,
             )
             Spacer(Modifier.width(6.dp))
+        }
+
+        // 效果设置跟样式选择是一对，摆在它左边，不混进右边那排页面操作里。
+        onOpenEffectSettings?.let { open ->
+            IconButton(onClick = open) {
+                Icon(
+                    imageVector = Icons.Rounded.Tune,
+                    contentDescription = "效果设置",
+                    tint = tint,
+                )
+            }
         }
 
         StylePicker(

@@ -27,7 +27,7 @@ import com.sakura.music.data.prefs.NowPlayingStyle
 fun NowPlayingSystemBars(style: NowPlayingStyle) {
     val view = LocalView.current
     val themeIsDark = MaterialTheme.colorScheme.background.luminance() < 0.5f
-    val darkCanvas = style == NowPlayingStyle.Immersive || style == NowPlayingStyle.Nebbia
+    val darkCanvas = style != NowPlayingStyle.Native && style != NowPlayingStyle.Classic
     val restoreDark by rememberUpdatedState(themeIsDark)
 
     LaunchedEffect(view, darkCanvas, themeIsDark) {

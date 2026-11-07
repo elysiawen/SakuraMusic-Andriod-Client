@@ -119,3 +119,33 @@ export function normalizeTheme(payload: unknown): ThemePayload {
     backgroundColor: read(source?.backgroundColor, THEME_FALLBACK.backgroundColor),
   };
 }
+
+/**
+ * 效果设置：Kotlin 只存「用户改过的那几项」JSON，这里以该效果的 DEFAULT_*_TUNING
+ * 为底做深合并，得到一份完整 tuning。这样加字段、改默认值都只要动 TS 那边，
+ * 老存档里缺的字段自动用新默认值补上，坏值由各效果自己的 normalize 兜底。
+ *
+ * key 支持 `quality.shadows` 这样的点路径，用来写嵌套对象；未知字段原样带进去，
+ * 引擎只读认识的键，等价于忽略。
+ */
+export function applySettings<T extends object>(defaults: T, patch: unknown): T {
+  const target: Record<string, unknown> = JSON.parse(JSON.stringify(defaults));
+  const source = asObject(patch);
+  if (!source || typeof source !== 'object' || Array.isArray(source)) {
+    return target as unknown as T;
+  }
+  for (const [key, value] of Object.entries(source as Record<string, unknown>)) {
+    if (value === undefined || value === null) continue;
+    const parts = key.split('.');
+    let node = target;
+    for (let i = 0; i < parts.length - 1; i += 1) {
+      const child = node[parts[i]];
+      if (!child || typeof child !== 'object' || Array.isArray(child)) {
+        node[parts[i]] = {};
+      }
+      node = node[parts[i]] as Record<string, unknown>;
+    }
+    node[parts[parts.length - 1]] = value;
+  }
+  return target as unknown as T;
+}

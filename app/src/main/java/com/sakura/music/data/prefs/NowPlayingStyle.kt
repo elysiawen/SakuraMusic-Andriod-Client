@@ -7,7 +7,7 @@ package com.sakura.music.data.prefs
  * 顶栏的样式菜单与 `PlayerScreen` 的分发都读它，不用再去别处接线。
  *
  * 安卓端多出一项 [Native]：原来那套播放页原样保留，作为没换过样式的默认值；
- * 网页端的三套样式是后来接入的可选项，所以老用户升级后看到的仍然是熟悉的页面。
+ * 网页端的样式是后来接入的可选项，所以老用户升级后看到的仍然是熟悉的页面。
  */
 enum class NowPlayingStyle(val id: String, val label: String, val hint: String) {
 
@@ -37,11 +37,29 @@ enum class NowPlayingStyle(val id: String, val label: String, val hint: String) 
         id = "nebbia",
         label = "雾窗",
         hint = "雨夜车窗 · 指尖按笔顺写歌词 · 雨点随歌声打窗",
+    ),
+
+    /** 网页端绘光：PixiJS 追光歌词与粒子。 */
+    Lumiere(
+        id = "lumiere",
+        label = "绘光",
+        hint = "追光歌词 · 光束与粒子",
+    ),
+
+    /** 网页端町景：three.js 街景剧场。 */
+    Machi(
+        id = "machi",
+        label = "町景",
+        hint = "街景剧场 · 相机与景深",
     );
 
-    /** 是否来自网页端的三套样式（原生页的皮肤与它们不同）。 */
+    /** 是否来自网页端的样式（原生页的皮肤与它们不同）。 */
     val fromDesktop: Boolean
         get() = this != Native
+
+    /** 画布由 WebView 提供，需要 WebGL2。 */
+    val isWebEffect: Boolean
+        get() = this == Nebbia || this == Lumiere || this == Machi
 
     companion object {
         val Default = Native

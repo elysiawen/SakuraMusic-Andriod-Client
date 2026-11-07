@@ -75,7 +75,7 @@ import com.sakura.music.ui.screens.player.nowplaying.common.subtitleWithLinks
 import com.sakura.music.ui.screens.player.nowplaying.styles.ClassicNowPlaying
 import com.sakura.music.ui.screens.player.nowplaying.styles.ImmersiveNowPlaying
 import com.sakura.music.ui.screens.player.nowplaying.styles.NativeNowPlaying
-import com.sakura.music.ui.screens.player.nowplaying.styles.NebbiaNowPlaying
+import com.sakura.music.ui.screens.player.nowplaying.styles.WebEffectNowPlaying
 import com.sakura.music.ui.util.formatTogetherDuration
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -397,7 +397,10 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
                     modifier = Modifier.fillMaxSize(),
                 )
 
-                NowPlayingStyle.Nebbia -> NebbiaNowPlaying(
+                NowPlayingStyle.Nebbia,
+                NowPlayingStyle.Lumiere,
+                NowPlayingStyle.Machi -> WebEffectNowPlaying(
+                    effectId = activeStyle.id,
                     state = uiState,
                     actions = actions,
                     collapseGesture = collapseGesture,

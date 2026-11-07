@@ -7,5 +7,10 @@
   },
   "devDependencies": {
     "esbuild": "0.25.12"
+  },
+  "dependencies": {
+    "@chenglou/pretext": "^0.0.9",
+    "pixi.js": "^8.22.0",
+    "three": "^0.185.1"
   }
 }

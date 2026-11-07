@@ -1,29 +1,30 @@
 /**
- * 雾笺运行时的安卓外壳。
+ * 雾窗运行时的安卓外壳。
  *
- * 桌面端用 Vue + React 外壳把歌、主题、tuning 和两个 MotionValue 喂给
- * `createNebbiaRuntime`；安卓端不需要任何 DOM UI，只负责：
+ * 渲染引擎与桌面端共用 `engine/` 下的同一份快照（nebbia/ + folia/），
+ * 和绘光、町景一样；这里只留外壳，负责：
  *   - 建运行时（全屏画布）
  *   - 接收 Compose 通过 JS 桥推过来的歌 / 主题 / 播放进度
  *   - 把 ready / firstFrame / failed 回传给 Kotlin
  *
- * 线格式归一化与事件回传放在 `shared/`，本文件只留雾笺自己的
- * 播放时钟、运行时生命周期与宿主接口。
+ * 线格式归一化与事件回传放在 `shared/`，播放时钟、运行时生命周期与宿主接口
+ * 留在效果目录里（每个效果各有一份）。
  *
  * 进度只在收到 Kotlin 的采样时校准锚点，帧内按 performance.now 外推，
  * 保证暂停、seek、后台切回都跟得上，又不用每帧过桥。
  */
 
 import { createPost } from '../../shared/bridge';
-import { asObject, normalizeSong, normalizeTheme, THEME_FALLBACK } from '../../shared/protocol';
-import { NebbiaRuntime } from './nebbia/createNebbiaRuntime';
-import type { Theme } from './nebbia/foliaTypes';
-import { DEFAULT_NEBBIA_TUNING, type NebbiaSong } from './nebbia/types';
+import { applySettings, asObject, normalizeSong, normalizeTheme, THEME_FALLBACK } from '../../shared/protocol';
+import { NebbiaRuntime } from '../../engine/nebbia/createNebbiaRuntime';
+import type { Theme } from '../../engine/folia/foliaTypes';
+import { DEFAULT_NEBBIA_TUNING, type NebbiaSong, type NebbiaTuning } from '../../engine/nebbia/types';
 
-interface NebbiaHost {
+interface NowPlayingHost {
   setSong(payload: unknown): void;
   setTheme(payload: unknown): void;
   setPlayback(payload: unknown): void;
+  setSettings(payload: unknown): void;
   requestFrame(): void;
   reload(): void;
   destroy(): void;
@@ -31,12 +32,12 @@ interface NebbiaHost {
 
 declare global {
   interface Window {
-    nebbia?: NebbiaHost;
+    nowPlaying?: NowPlayingHost;
   }
 }
 
 const STAGE_ID = 'stage';
-const post = createPost('AndroidNebbia');
+const post = createPost('AndroidNowPlaying');
 
 /* ── 播放时钟 ───────────────────────────────────────────────────── */
 
@@ -68,6 +69,8 @@ function vocal(): number {
 
 let song: NebbiaSong = { lines: [], seed: 'nebbia' };
 let theme: Theme = THEME_FALLBACK;
+/** 设置面板推来的 tuning：以默认值为底，只覆盖用户改过的字段。 */
+let tuning: NebbiaTuning = applySettings(DEFAULT_NEBBIA_TUNING, null);
 
 /* ── 运行时 ─────────────────────────────────────────────────────── */
 
@@ -92,8 +95,8 @@ function createRuntime(): void {
       {
         host,
         seeThrough: false,
-        scene: 'night',
-        glass: DEFAULT_NEBBIA_TUNING.glass,
+        scene: tuning.behind === 'aquarium' ? 'aquarium' : 'night',
+        glass: tuning.glass,
         currentTime: { get: currentTime },
         vocal: { get: vocal },
         onFirstFrame: () => {
@@ -111,7 +114,7 @@ function createRuntime(): void {
         },
       },
       theme,
-      DEFAULT_NEBBIA_TUNING,
+      applySettings(tuning, null),
       1,
     );
     runtime.setSong(song);
@@ -124,8 +127,21 @@ function createRuntime(): void {
 
 /* ── 对 Kotlin 暴露的接口 ─────────────────────────────────────────── */
 
+/** 设置面板推来的 patch：窗外 / 玻璃写进着色器，必须重建；其余热更。 */
+function applyTuning(payload: unknown): void {
+  const previous = tuning;
+  tuning = applySettings(DEFAULT_NEBBIA_TUNING, payload);
+  if (previous.behind !== tuning.behind || previous.glass !== tuning.glass) {
+    firstFrameSent = false;
+    restored = false;
+    createRuntime();
+  } else {
+    runtime?.setTuning(tuning);
+  }
+}
+
 function installHost(): void {
-  window.nebbia = {
+  window.nowPlaying = {
     setSong(payload: unknown) {
       const next = normalizeSong(asObject(payload));
       song = { ...next, seed: next.seed ?? 'nebbia' };
@@ -141,6 +157,9 @@ function installHost(): void {
       anchorMs = Math.max(0, Number(source?.positionMs) || 0);
       anchorAt = performance.now();
       runtime?.setPlayback(!playing, false);
+    },
+    setSettings(payload: unknown) {
+      applyTuning(payload);
     },
     requestFrame() {
       runtime?.requestFrame();

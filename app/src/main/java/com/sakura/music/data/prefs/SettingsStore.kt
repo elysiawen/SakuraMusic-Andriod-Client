@@ -54,6 +54,10 @@ class SettingsStore(private val context: Context) {
         /** 每个平台的取流方式（`smart` / `direct` / `proxy`），见 [RoutePreference]。 */
         fun routePreference(platform: Platform) =
             stringPreferencesKey("route_preference_${platform.id}")
+
+        /** 每个网页端播放页效果各存一份 tuning patch（JSON），空对象就是全用默认值。 */
+        fun effectSettings(effectId: String) =
+            stringPreferencesKey("now_playing_effect_settings_$effectId")
         val RememberedUsername = stringPreferencesKey("remembered_username")
 
         /** 搜索记录：换行分隔（关键词里的空白在存之前就被压平了，不会含换行）。 */
@@ -113,6 +117,10 @@ class SettingsStore(private val context: Context) {
 
     val nowPlayingStyle: Flow<NowPlayingStyle> = context.settingsDataStore.data
         .map { NowPlayingStyle.fromId(it[Keys.NowPlaying]) }
+
+    /** 效果设置面板存的「改过的字段」；空 JSON 表示全用该效果的默认 tuning。 */
+    fun effectSettings(effectId: String): Flow<String> = context.settingsDataStore.data
+        .map { it[Keys.effectSettings(effectId)] ?: "{}" }
 
     val quality: Flow<Quality> = context.settingsDataStore.data
         .map { Quality.fromId(it[Keys.Quality]) }
@@ -205,6 +213,11 @@ class SettingsStore(private val context: Context) {
 
     suspend fun setNowPlayingStyle(value: NowPlayingStyle) = edit {
         it[Keys.NowPlaying] = value.id
+    }
+
+    /** 整块覆盖该效果的设置 patch；面板里滑块松手、开关切换时才落盘。 */
+    suspend fun setEffectSettings(effectId: String, raw: String) = edit {
+        it[Keys.effectSettings(effectId)] = raw
     }
 
     suspend fun setQuality(value: Quality) = edit { it[Keys.Quality] = value.id }
