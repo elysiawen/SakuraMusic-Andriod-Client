@@ -14,16 +14,15 @@ import kotlinx.coroutines.flow.update
 data class AuthState(
     val user: PublicUser? = null,
     val stats: UserStats? = null,
-    /** 启动时是否已经问过服务端「我是谁」。 */
-    val resolved: Boolean = false,
     /** 正在跑登录 / 注册 / 登出这类有交互反馈的操作。 */
     val busy: Boolean = false,
     /**
-     * 没问出登录态（网络不通），但本机留着会话 Cookie，于是先按已登录处理。
+     * 还没向服务端确认过身份，但本机留着会话 Cookie，于是先按已登录处理。
      *
-     * 这条路径是为了断网也能用：用户可能只是想听下载好的歌，不该被拦在登录页外——
-     * 那里的登录同样要联网，等于把人锁死。等网络恢复后 [AuthRepository.refresh] 会给出
-     * 真正的答案；服务端明确说未登录（401）时也会照常踢回登录页。
+     * 冷启动的首帧就是这个状态：先放人进主界面（断网也能听下载好的歌），
+     * 真正的登录态由后台的 [AuthRepository.refresh] 补上；服务端明确说未登录（401）时
+     * 会照常踢回登录页。把确认放在界面之后，是为了不让「网关没部署 / 地址没配好」
+     * 的普通用户卡在连接超时里。
      */
     val offline: Boolean = false,
 ) {
@@ -42,25 +41,41 @@ class AuthRepository(
     private val settings: SettingsStore,
 ) {
 
-    private val _state = MutableStateFlow(AuthState())
+    /**
+     * 首帧就同步给出结论，不留「等网络回答」的启动门。
+     *
+     * 留着会话说明此前登录过，值得后台再问一次服务端；没有会话（首次安装、登出之后）
+     * 就直接判定未登录——这时候连网关没有意义，网关地址可能还没配好。
+     */
+    private val _state = MutableStateFlow(
+        if (cookies.hasSessionCookie()) AuthState(offline = true) else AuthState()
+    )
     val state: StateFlow<AuthState> = _state.asStateFlow()
 
-    /** 启动时调用一次，拿到登录态与统计。 */
+    /**
+     * 冷启动时调用一次：只有本机留着会话时才去连网关确认登录态。
+     *
+     * 首次安装时 `/api/auth/me` 最多也只会回答「没登录」，而构建时注入的默认地址
+     * 在真机上根本不可达；发出去只会让启动页干等连接超时，还把「修改网关地址」
+     * 的入口挡在后面。等用户真的点登录、或主动配置地址时再连不迟。
+     */
+    suspend fun refreshIfSessionExists() {
+        if (_state.value.user != null || cookies.hasSessionCookie()) refresh()
+    }
+
+    /** 向服务端确认登录态与统计；网络不通时保留本机会话，按离线处理。 */
     suspend fun refresh() {
         runCatching { api.me() }
             .onSuccess { response ->
                 _state.update {
-                    it.copy(user = response.user, stats = response.stats, resolved = true, offline = false)
+                    it.copy(user = response.user, stats = response.stats, offline = false)
                 }
             }
             .onFailure {
                 // 网络不通时不要把人踢下线，保留上一次的登录态；只有服务端明确说
                 // 未登录（401）才会走到 onSessionExpired 里清状态。
-                //
-                // 冷启动时上一次的登录态是空的，所以这里再看一眼本机有没有会话 Cookie：
-                // 有就先进主界面（离线也能听本地歌），没有才当作没登录。
                 _state.update {
-                    it.copy(resolved = true, offline = it.user == null && cookies.hasSessionCookie())
+                    it.copy(offline = it.user == null && cookies.hasSessionCookie())
                 }
             }
     }
@@ -96,7 +111,7 @@ class AuthRepository(
         // 服务端会话已经无效时登出照样算成功，本地清理不能少。
         runCatching { api.logout() }
         cookies.clear()
-        _state.value = AuthState(resolved = true)
+        _state.value = AuthState()
     }
 
     suspend fun updateProfile(nickname: String?, avatar: String?, clearAvatar: Boolean = false) {
@@ -113,7 +128,7 @@ class AuthRepository(
     suspend fun changePassword(oldPassword: String, newPassword: String) {
         api.changePassword(oldPassword, newPassword)
         cookies.clear()
-        _state.value = AuthState(resolved = true)
+        _state.value = AuthState()
     }
 
     suspend fun refreshStats() {
@@ -133,6 +148,6 @@ class AuthRepository(
     fun onSessionExpired() {
         if (_state.value.user == null && !_state.value.offline) return
         cookies.clear()
-        _state.value = AuthState(resolved = true)
+        _state.value = AuthState()
     }
 }

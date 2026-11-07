@@ -22,7 +22,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.WindowInsetsSides
 import androidx.compose.foundation.layout.asPaddingValues
@@ -33,11 +32,9 @@ import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Explore
-import androidx.compose.material.icons.rounded.LibraryMusic
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -431,11 +428,13 @@ fun SakuraRoot(container: AppContainer) {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    // 启动时确认登录态；未登录时 /api/auth/me 返回 200 + null，不报错。
-    LaunchedEffect(Unit) { container.authRepository.refresh() }
+    // 启动时不主动连网关：没登录过就没什么登录态可恢复，等用户点登录或改地址时再连。
+    // 之前登录过（本机留着会话）才值得在后台确认一次，界面这边早就先放行了。
+    LaunchedEffect(Unit) { container.authRepository.refreshIfSessionExists() }
 
-    LaunchedEffect(auth.isLoggedIn) {
-        if (auth.isLoggedIn) {
+    // 只有服务端确认过身份才去拉云端收藏；首帧的「离线待确认」不该再打一次网关。
+    LaunchedEffect(auth.user != null) {
+        if (auth.user != null) {
             container.libraryRepository.refreshFavorites()
         } else {
             container.libraryRepository.clear()
@@ -452,9 +451,6 @@ fun SakuraRoot(container: AppContainer) {
                 color = MaterialTheme.colorScheme.background,
             ) {
                 when {
-                    // 登录态还没确认前先亮个品牌页，免得闪一下登录页又跳走。
-                    !auth.resolved -> BrandSplash()
-
                     // 用 isLoggedIn 而不是「user 是否为空」：断网时问不出用户信息，
                     // 但本机还留着会话，此时该放人进主界面（至少能听下载好的歌），
                     // 而不是把他推到登录页——那里同样要联网，等于锁死。
@@ -468,34 +464,6 @@ fun SakuraRoot(container: AppContainer) {
                     )
                 }
             }
-        }
-    }
-}
-
-/** 登录态未知时展示的品牌页。 */
-@Composable
-private fun BrandSplash() {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                imageVector = Icons.Rounded.LibraryMusic,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.size(52.dp),
-            )
-            Spacer(Modifier.height(18.dp))
-            Text(text = "Sakura Music", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(4.dp))
-            Text(
-                text = "正在连接网关…",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
         }
     }
 }

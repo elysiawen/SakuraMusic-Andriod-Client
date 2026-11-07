@@ -72,9 +72,9 @@ class SettingsStore(private val context: Context) {
     /**
      * 网关地址单独存在 SharedPreferences 里，没有跟其它偏好一起进 DataStore。
      *
-     * 原因很具体：它在冷启动的**第一次网络请求之前**就要用上（第一个请求就是探登录态的
-     * `/api/auth/me`），而 DataStore 是异步的——用 DataStore 的话，首帧到第一次读取之间
-     * 有个窗口会拿到默认值。SharedPreferences 的读取是同步的，这个问题就不存在了。
+     * 原因是请求链路要同步拿地址（OkHttp 建请求时没有挂起的机会），而 DataStore 是异步的，
+     * 首帧到第一次读取之间会有一个拿到默认值的窗口。SharedPreferences 读取是同步的，
+     * 地址改完立刻生效，不存在这个窗口。
      */
     private val gatewayPrefs = context.getSharedPreferences(PREFS_GATEWAY, Context.MODE_PRIVATE)
 

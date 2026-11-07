@@ -76,8 +76,10 @@ class AppContainer(private val appContext: Context) {
             /*
              * 只在「确认登录过」之后才做登出清理。
              *
-             * 首帧的登录态是「还没确认」，这时要是照登出处理，`roomSync.stop()` 会把本地
-             * 记着的房间码一起清掉——冷启动的自动回房就永远没机会发生了。
+             * 冷启动首帧是 offline=true（本机留着会话、还没问过服务端），虽然
+             * isLoggedIn 为真，但上面要求 !offline 才连长连接；`started` 仍是 false，
+             * 所以不会误调 `roomSync.stop()` 把本地记着的房间码清掉——等服务端确认
+             * 登录后，自动回房才有机会发生。
              */
             var started = false
             // 登录态会因为改昵称之类的小事再发一次，平台开关没必要跟着重拉。
@@ -135,11 +137,13 @@ class AppContainer(private val appContext: Context) {
     /**
      * 网关地址变了。
      *
-     * 会话 Cookie 是按 host 保存的，换一个 host 之后自然带不上去，所以这里重新问一次
-     * 登录态：能继续就继续，不能就回到登录页，而不是等用户点某个操作才发现 401。
+     * 会话 Cookie 是按 host 保存的，换一个 host 之后自然带不上去，所以之前登录过的话
+     * 要重新问一次登录态：能继续就继续，不能就回到登录页，而不是等用户点某个操作才
+     * 发现 401。没登录过就什么都不做——「测试连接」已经探过活了，没必要再打一次
+     * `/api/auth/me`，接下来用户点登录自然会用新地址。
      */
     fun onGatewayChanged() {
-        scope.launch { authRepository.refresh() }
+        scope.launch { authRepository.refreshIfSessionExists() }
     }
 
     /**

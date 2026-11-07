@@ -9,6 +9,7 @@ import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -21,6 +22,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.webkit.WebViewAssetLoader
 import androidx.webkit.WebViewAssetLoader.AssetsPathHandler
 import com.sakura.music.ui.screens.player.nowplaying.NowPlayingUiState
@@ -161,12 +165,54 @@ fun NebbiaWebView(
         },
     )
 
+    /*
+     * 全屏页还展开着就把应用切到后台时，WebView 不会自己停下来：页面里的 rAF / WebGL
+     * 通常只是被系统节流，画布与 GPU 上下文还一直挂着。跟着宿主生命周期显式暂停/恢复。
+     *
+     * 只用实例级的 onPause / onResume，不动 pauseTimers 那种全局开关：这个页面没有
+     * setInterval / setTimeout，只有 rAF，窗口不可见时系统本就会停掉帧驱动；全局开关
+     * 反而可能在页面被后台销毁后漏给下一个 WebView，把它的定时器一起停住。
+     */
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(webView, lifecycleOwner) {
+        val view = webView
+        if (view == null) {
+            onDispose { }
+        } else {
+            var paused = false
+            val observer = LifecycleEventObserver { _, event ->
+                when (event) {
+                    Lifecycle.Event.ON_PAUSE -> {
+                        view.onPause()
+                        paused = true
+                    }
+
+                    Lifecycle.Event.ON_RESUME -> {
+                        if (paused) {
+                            view.onResume()
+                            paused = false
+                        }
+                    }
+
+                    else -> Unit
+                }
+            }
+            lifecycleOwner.lifecycle.addObserver(observer)
+            onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+        }
+    }
+
     LaunchedEffect(webView, pageTick, themeJson) {
         webView?.callJson("setTheme", themeJson)
     }
     LaunchedEffect(webView, pageTick, songJson) {
         webView?.callJson("setSong", songJson)
     }
+    /*
+     * 播放中每 400ms 推一次进度锚点，用来纠正 Web 侧时钟在缓冲 / seek 之后的漂移。
+     * 暂停时播放状态快照不变（StateFlow 对相等的 data class 不发射），这里的 key 就不变，
+     * 不会重跑，也就不存在「暂停还一直补画静止帧」的空推送；拖动进度时每帧一推是有意的预览。
+     */
     LaunchedEffect(webView, pageTick, state.isPlaying, state.shownPositionMs) {
         webView?.callJson(
             "setPlayback",
