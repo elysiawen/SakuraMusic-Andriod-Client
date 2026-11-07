@@ -141,7 +141,6 @@ fun WebEffectNowPlaying(
                 } else {
                     null
                 },
-                modifier = Modifier.padding(horizontal = 8.dp),
             )
             Spacer(Modifier.weight(1f))
         }

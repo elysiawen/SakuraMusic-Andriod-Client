@@ -127,6 +127,7 @@ fun ClassicNowPlaying(
                 state = state,
                 actions = actions,
                 skin = NowPlayingSkin.Material,
+                outerHorizontalPadding = if (wide) 34.dp else 20.dp,
             )
 
             if (wide) {

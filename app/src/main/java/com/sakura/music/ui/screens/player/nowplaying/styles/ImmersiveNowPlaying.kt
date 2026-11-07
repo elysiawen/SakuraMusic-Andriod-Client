@@ -136,7 +136,6 @@ fun ImmersiveNowPlaying(
                 state = state,
                 actions = actions,
                 skin = NowPlayingSkin.Desktop,
-                modifier = Modifier.padding(horizontal = if (wide) 18.dp else 8.dp),
             )
 
             MetaRow(

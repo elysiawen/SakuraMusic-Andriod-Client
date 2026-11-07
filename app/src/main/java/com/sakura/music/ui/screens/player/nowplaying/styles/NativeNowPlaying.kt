@@ -65,6 +65,7 @@ fun NativeNowPlaying(
             state = state,
             actions = actions,
             skin = NowPlayingSkin.Material,
+            outerHorizontalPadding = 24.dp,
         )
 
         if (isLandscape) {
