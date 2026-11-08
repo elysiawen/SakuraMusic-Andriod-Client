@@ -13,7 +13,8 @@ playback lives in a foreground service and the UI is just its remote control.
 - Personal radio: "Private Roaming" (NetEase) / "Immersion Mix" (QQ Music) enqueue a whole batch
   from the home page; the next batch is fetched via `GET /api/radio/:platform` when the last track
   starts (session dedup, cooldown retries on empty batches, resumes after a refresh).
-  Follows the per-platform toggle and is mutually exclusive with Listen Together
+  Follows the per-platform toggle and is mutually exclusive with Listen Together only on the device
+  holding the room seat; a spectator device can still use its own radio
 - Audio quality: a unified 7-tier model; tier names follow the current track's platform
   (QQ client terms: Standard / HQ / SQ / Premium / Master 4.0 / Spatial Audio).
   "Current quality" shows what the gateway actually returned, which may be a downgraded tier

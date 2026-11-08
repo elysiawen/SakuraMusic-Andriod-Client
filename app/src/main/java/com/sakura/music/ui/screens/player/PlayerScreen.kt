@@ -323,7 +323,8 @@ fun PlayerScreen(onCollapse: () -> Unit, navigator: SakuraNavigator) {
         openQueue = { showQueue = true },
         openActions = { showActions = true },
         openTogether = {
-            if (state.radio != null) {
+            // 电台只挡「不在房间时」的入口：旁观设备仍要能打开面板查看房间状态。
+            if (state.radio != null && !inRoom) {
                 message = "正在听私人电台，请先退出电台再使用「一起听」"
             } else {
                 showTogether = true

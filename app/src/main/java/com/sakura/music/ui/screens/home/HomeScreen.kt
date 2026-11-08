@@ -79,8 +79,9 @@ fun HomeScreen(navigator: SakuraNavigator) {
     val auth by container.authRepository.state.collectAsStateWithLifecycle()
     val playback by container.playbackCenter.state.collectAsStateWithLifecycle()
     val platformPrefs by container.platformPrefs.state.collectAsStateWithLifecycle()
-    // 电台与「一起听」互斥：在房间里时卡片置灰、不可点。
+    // 电台只与「本机占着一起听席位」互斥：旁观设备（同账号另一台在放）照常可用电台。
     val roomCode by container.roomSync.code.collectAsStateWithLifecycle()
+    val spectating by container.roomSync.spectating.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
 
     val current = state
@@ -216,7 +217,7 @@ fun HomeScreen(navigator: SakuraNavigator) {
                                 sections = current.radioSections,
                                 radio = playback.radio,
                                 radioLoading = playback.radioLoading,
-                                roomActive = roomCode != null,
+                                seatActive = roomCode != null && !spectating,
                                 onStart = { platform, tracks ->
                                     container.playbackCenter.startRadio(platform, tracks)
                                 },

@@ -172,8 +172,11 @@ class PlaybackCenter(
      * 不直接依赖偏好仓库：它与播放器在装配时互相引用，注入一份判定即可避免构造环。
      */
     private val radioPlatformAllowed: (Platform) -> Boolean = { true },
-    /** 是否正在「一起听」：电台与房间互斥，覆盖邀请链接、自动回房这些绕过 UI 的路径。 */
-    private val roomActive: () -> Boolean = { false },
+    /**
+     * 本机是否占着「一起听」席位：只有这台设备与私人电台互斥；旁观设备
+     * （同账号另一台在放）照常可用电台。覆盖邀请链接、自动回房这些绕过 UI 的路径。
+     */
+    private val roomSeatActive: () -> Boolean = { false },
 ) {
 
     // MediaController 只能在它被创建的那个线程（主线程）上访问。
@@ -398,7 +401,7 @@ class PlaybackCenter(
         // 电台现场跟着队列一起回来：队列里的歌还在，快放完时就能接着自动续。
         // 退出电台时落盘里的 radioLive 会被立刻删掉，所以这里不会有「已退出的电台复活」。
         val live = saved.radioLive
-        if (live != null && live.platform.isKnown && radioPlatformAllowed(live.platform) && !roomActive()) {
+        if (live != null && live.platform.isKnown && radioPlatformAllowed(live.platform) && !roomSeatActive()) {
             val restored = RadioState(live.platform, live.session)
             radio = restored
             _state.update { it.copy(radio = restored) }
@@ -875,7 +878,7 @@ class PlaybackCenter(
     /**
      * 暂停 / 恢复「个人现场」的落盘。一起听入房时暂停、退房时恢复。
      *
-     * 房间与电台互斥：被服务端推进一起听时电台就地结束并给出提示，
+     * 只有本机被接进「一起听」席位才会走到这里（旁观不暂停落盘）：电台就地结束并给出提示，
      * 免得后台还在往一个自己再也看不见的队列里续歌。
      */
     fun setPersistencePaused(paused: Boolean) {
@@ -884,7 +887,7 @@ class PlaybackCenter(
             mainScope.launch {
                 if (radio != null) {
                     stopRadio()
-                    _notice.value = "已进入「一起听」，私人电台已停止"
+                    _notice.value = "本机已进入「一起听」，私人电台已停止"
                 }
             }
         }
@@ -1139,8 +1142,8 @@ class PlaybackCenter(
      * 没拿到板块时（例如还没绑定账号）才退化为「现取一批」。
      */
     fun startRadio(platform: Platform, initialTracks: List<UnifiedTrack> = emptyList()) {
-        if (roomActive() || persistencePaused) {
-            _notice.value = "正在「一起听」中，请先退出再使用私人电台"
+        if (roomSeatActive() || persistencePaused) {
+            _notice.value = "本机正在「一起听」中，请先退出再使用私人电台"
             return
         }
         if (!radioPlatformAllowed(platform)) {
@@ -1189,7 +1192,7 @@ class PlaybackCenter(
             // 没在听电台时不做这次读盘：点歌是高频操作，不该为它解析整份存档。
             clearPersistedRadio()
             controller?.let { if (!roomPlayMode) applyPlayMode(personalPlayMode) }
-            if (announce) _notice.value = "已退出私人电台，现在可以使用「一起听」"
+            if (announce) _notice.value = "已退出私人电台，现在可以把「一起听」接到本机"
         }
     }
 
@@ -1265,7 +1268,7 @@ class PlaybackCenter(
     private suspend fun doRefill(force: Boolean): Int {
         val state = radio ?: return 0
         val generation = radioGeneration
-        if (roomActive() || persistencePaused) return 0
+        if (roomSeatActive() || persistencePaused) return 0
         if (stopRadioIfBlocked()) return 0
         if (!force && System.currentTimeMillis() - radioRetryAt < RADIO_RETRY_MS) return 0
 
@@ -1322,7 +1325,7 @@ class PlaybackCenter(
         if (stopRadioIfBlocked()) return
         val state = radio ?: return
         if (_state.value.radioLoading || radioInFlight?.isActive == true) return
-        if (roomActive() || persistencePaused) return
+        if (roomSeatActive() || persistencePaused) return
         if (System.currentTimeMillis() - radioRetryAt < RADIO_RETRY_MS) return
         val queue = _state.value.queue
         val index = _state.value.index

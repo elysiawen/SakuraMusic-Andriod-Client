@@ -52,7 +52,8 @@ private val QQ_ACCENT = Color(0xFF31C27C)
  *
  * 卡片背后是发现页已经取回的一整批（私人 FM 3 首 / 猜你喜欢 5 首），点开时整批入队，
  * 一次电台请求都不打；最后一首开始播时才由播放器续下一批。
- * 平台开关关掉的平台不在这里出现，正在「一起听」时卡片置灰并禁用。
+ * 平台开关关掉的平台不在这里出现；只有**本机占着一起听席位**时卡片才置灰禁用，
+ * 旁观设备（同账号另一台在放）照常可用电台。
  */
 @Composable
 fun RadioCards(
@@ -60,7 +61,7 @@ fun RadioCards(
     sections: List<HomeSection>,
     radio: RadioState?,
     radioLoading: Boolean,
-    roomActive: Boolean,
+    seatActive: Boolean,
     onStart: (Platform, List<UnifiedTrack>) -> Unit,
     onStop: () -> Unit,
     modifier: Modifier = Modifier,
@@ -85,7 +86,7 @@ fun RadioCards(
                         tracks = tracks,
                         active = radio?.platform == platform,
                         loading = radioLoading && radio?.platform == platform,
-                        blocked = roomActive,
+                        blocked = seatActive,
                         onStart = { onStart(platform, tracks) },
                         onStop = onStop,
                         modifier = Modifier.weight(1f),
@@ -126,7 +127,7 @@ private fun RadioCard(
         artists?.let { "${track.title} - $it" } ?: track.title
     } ?: "点一下，电台就开始滚动"
     val note = when {
-        blocked -> "「一起听」中暂不可用"
+        blocked -> "本机正在「一起听」中，退出后可用"
         active -> "电台播放中 · 可退出"
         else -> "点开即播 · 自动续歌"
     }

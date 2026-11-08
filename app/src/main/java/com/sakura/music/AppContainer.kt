@@ -475,8 +475,8 @@ class AppContainer(private val appContext: Context) {
             radioPlatformAllowed = { platform: Platform ->
                 platformPrefs.isEnabled(platform, PlatformCapability.DISCOVER)
             },
-            // 电台与「一起听」互斥，判据取房间语义而不是 UI 按钮。
-            roomActive = { roomSync.active },
+            // 电台只与「本机占着一起听席位」互斥：旁观设备（同账号另一台在放）照常可用电台。
+            roomSeatActive = { roomSync.seatActive },
         )
     }
 }

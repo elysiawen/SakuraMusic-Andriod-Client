@@ -267,9 +267,9 @@ class RoomSync(
      * 对面进来即可接着同一首、同一进度。
      */
     suspend fun create(): String? {
-        // 电台与「一起听」互斥：这一层硬拦截覆盖邀请链接、刷新自动回房这些绕过 UI 的路径。
+        // 电台只与「让本机占席位」互斥：这一层硬拦截覆盖邀请链接、刷新自动回房这些绕过 UI 的路径。
         if (playback.state.value.radio != null) {
-            _notice.value = "正在听私人电台，请先退出电台再使用「一起听」"
+            _notice.value = "正在听私人电台，请先退出电台再在本机使用「一起听」"
             return null
         }
         val local = playback.state.value
@@ -308,7 +308,7 @@ class RoomSync(
      */
     suspend fun join(input: String): Boolean {
         if (playback.state.value.radio != null) {
-            _notice.value = "正在听私人电台，请先退出电台再使用「一起听」"
+            _notice.value = "正在听私人电台，请先退出电台再在本机使用「一起听」"
             return false
         }
         val roomCode = input.trim().uppercase()
@@ -1083,7 +1083,7 @@ class RoomSync(
      */
     private suspend fun reclaim(codeArg: String?) {
         val roomCode = codeArg ?: return
-        // 设备转移席位也走这里：正在听电台时不该被悄悄拉进房间。
+        // 设备转移席位也走这里：本机要占席位，正在听电台时不该被悄悄拉进房间。
         if (playback.state.value.radio != null) return
         if (joining) return
         joining = true

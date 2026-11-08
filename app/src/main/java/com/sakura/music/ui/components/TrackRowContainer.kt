@@ -118,7 +118,7 @@ fun TrackRowContainer(
                  * 房间里没有「插队」这个动作：共享队列的排法由服务端说了算，
                  * 本机插一首进去，下一拍就会被镜像装回房间那一份。所以退化成「加到队尾」。
                  */
-                if (container.roomSync.active) {
+                if (container.roomSync.seatActive) {
                     container.roomSync.addTrack(track)
                     onMessage("已加入一起听队列")
                 } else {
